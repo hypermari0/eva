@@ -75,14 +75,30 @@ async def _call_llm(messages: list[dict], tools: list[dict]) -> dict:
     async with httpx.AsyncClient(timeout=120) as client:
         for attempt in range(4):
             resp = await client.post(OPENROUTER_URL, headers=_headers(), json=payload)
-            if resp.status_code == 429:
-                wait = 2 ** attempt  # 1s, 2s, 4s, 8s
-                logger.warning(f"Rate limited (429), retrying in {wait}s...")
+
+            # Retry on HTTP-level rate limits / server errors
+            if resp.status_code in (429, 502, 503, 504):
+                wait = 2 ** attempt
+                logger.warning(f"HTTP {resp.status_code}, retrying in {wait}s...")
                 await asyncio.sleep(wait)
                 continue
+
             resp.raise_for_status()
-            return resp.json()
-        # Final attempt — let it raise if still 429
+            data = resp.json()
+
+            # OpenRouter sometimes returns errors inside a 200 body
+            if "error" in data:
+                code = data["error"].get("code", 0)
+                if code in (429, 502, 503, 504) and attempt < 3:
+                    wait = 2 ** attempt
+                    logger.warning(f"OpenRouter error {code} in body, retrying in {wait}s...")
+                    await asyncio.sleep(wait)
+                    continue
+                raise RuntimeError(f"OpenRouter error: {data['error'].get('message', data['error'])}")
+
+            return data
+
+        # Exhausted retries
         resp.raise_for_status()
         return resp.json()
 
