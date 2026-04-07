@@ -66,3 +66,24 @@ def get_pending_reminders() -> list[dict]:
 
 def mark_reminder_sent(reminder_id: int) -> None:
     get_client().table("reminders").update({"sent": True}).eq("id", reminder_id).execute()
+
+
+def get_user_profile(user_id: int) -> str | None:
+    resp = (
+        get_client()
+        .table("user_profiles")
+        .select("profile")
+        .eq("user_id", user_id)
+        .execute()
+    )
+    if resp.data:
+        return resp.data[0]["profile"]
+    return None
+
+
+def save_user_profile(user_id: int, profile: str) -> None:
+    get_client().table("user_profiles").upsert({
+        "user_id": user_id,
+        "profile": profile,
+        "updated_at": datetime.now(timezone.utc).isoformat(),
+    }).execute()

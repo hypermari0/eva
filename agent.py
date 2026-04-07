@@ -13,18 +13,36 @@ import memory
 logger = logging.getLogger(__name__)
 
 OPENROUTER_URL = "https://openrouter.ai/api/v1/chat/completions"
-MODEL = "anthropic/claude-sonnet-4-5"
+MODEL = "qwen/qwen3.6-plus:free"
 MAX_TOOL_ROUNDS = 5
 
-_system_prompt: str | None = None
+_soul: str | None = None
+_prompt_template: str | None = None
 
 
-def get_system_prompt() -> str:
-    global _system_prompt
-    if _system_prompt is None:
-        path = Path(__file__).parent / "config" / "system_prompt.txt"
-        _system_prompt = path.read_text().strip()
-    return _system_prompt
+def _load_templates() -> None:
+    global _soul, _prompt_template
+    base = Path(__file__).parent / "config"
+    _soul = (base / "soul.md").read_text().strip()
+    _prompt_template = (base / "system_prompt.txt").read_text().strip()
+
+
+def build_system_prompt(user_id: int) -> str:
+    if _soul is None or _prompt_template is None:
+        _load_templates()
+
+    profile = memory.get_user_profile(user_id)
+    if profile:
+        user_section = profile
+    else:
+        user_section = (
+            "No profile yet — this is a new user. "
+            "Start by warmly introducing yourself and asking who they are: "
+            "their name, what they do, and what they'd like help with. "
+            "Save what you learn with update_user_profile."
+        )
+
+    return _prompt_template.replace("{{SOUL}}", _soul).replace("{{USER_PROFILE}}", user_section)
 
 
 def _headers() -> dict:
@@ -36,7 +54,7 @@ def _headers() -> dict:
 
 def _build_messages(user_id: int, user_text: str) -> list[dict]:
     history = memory.load_history(user_id)
-    messages = [{"role": "system", "content": get_system_prompt()}]
+    messages = [{"role": "system", "content": build_system_prompt(user_id)}]
     messages.extend(history)
     messages.append({"role": "user", "content": user_text})
     return messages

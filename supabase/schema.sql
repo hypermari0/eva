@@ -21,6 +21,14 @@ create table if not exists reminders (
 
 create index if not exists idx_reminders_pending on reminders (remind_at) where sent = false;
 
+-- User profiles: persistent knowledge about each user
+create table if not exists user_profiles (
+    user_id bigint primary key,
+    profile text not null default '',
+    created_at timestamptz not null default now(),
+    updated_at timestamptz not null default now()
+);
+
 -- Enable RLS (optional — disable if using service key)
 -- alter table messages enable row level security;
 -- alter table reminders enable row level security;

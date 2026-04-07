@@ -29,9 +29,8 @@ REMINDER_CHECK_INTERVAL = 60  # seconds
 
 
 async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    await update.message.reply_text(
-        "Hey! I'm Eva, your personal AI assistant. Send me a message and I'll do my best to help."
-    )
+    reply = await agent.chat(update.effective_user.id, "/start")
+    await update.message.reply_text(reply)
 
 
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
