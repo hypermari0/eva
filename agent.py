@@ -1,5 +1,6 @@
 """LLM agent: sends messages to OpenRouter, handles tool call loops."""
 
+import asyncio
 import json
 import logging
 import os
@@ -72,7 +73,16 @@ async def _call_llm(messages: list[dict], tools: list[dict]) -> dict:
         payload.pop("tools", None)
 
     async with httpx.AsyncClient(timeout=120) as client:
-        resp = await client.post(OPENROUTER_URL, headers=_headers(), json=payload)
+        for attempt in range(4):
+            resp = await client.post(OPENROUTER_URL, headers=_headers(), json=payload)
+            if resp.status_code == 429:
+                wait = 2 ** attempt  # 1s, 2s, 4s, 8s
+                logger.warning(f"Rate limited (429), retrying in {wait}s...")
+                await asyncio.sleep(wait)
+                continue
+            resp.raise_for_status()
+            return resp.json()
+        # Final attempt — let it raise if still 429
         resp.raise_for_status()
         return resp.json()
 
