@@ -97,13 +97,22 @@ async def chat(user_id: int, user_text: str) -> str:
 
     for _ in range(MAX_TOOL_ROUNDS):
         data = await _call_llm(messages, tool_list)
-        choice = data["choices"][0]
-        msg = choice["message"]
+        logger.info(f"LLM response: {json.dumps(data, default=str)[:1000]}")
+
+        choices = data.get("choices")
+        if not choices:
+            logger.error(f"No choices in LLM response: {data}")
+            return "Sorry, I got an unexpected response. Please try again."
+
+        msg = choices[0].get("message", {})
 
         # No tool calls — we have the final answer
         tool_calls = msg.get("tool_calls")
         if not tool_calls:
-            text = msg.get("content", "")
+            text = msg.get("content") or ""
+            if not text:
+                logger.warning(f"Empty content from LLM: {msg}")
+                return "Sorry, I got a blank response. Please try again."
             memory.save_message(user_id, "assistant", text)
             return text
 
