@@ -17,6 +17,7 @@ from telegram.ext import (
 )
 
 import agent
+import composio_bridge
 import memory
 
 logging.basicConfig(
@@ -31,6 +32,38 @@ REMINDER_CHECK_INTERVAL = 60  # seconds
 async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     reply = await agent.chat(update.effective_user.id, "/start")
     await update.message.reply_text(reply)
+
+
+async def connect_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Handle /connect <app> — initiate OAuth for an external service."""
+    args = context.args
+    if not args:
+        await update.message.reply_text(
+            "Usage: /connect <app>\n\n"
+            "Available apps: googlecalendar, gmail, slack, github\n\n"
+            "Example: /connect googlecalendar"
+        )
+        return
+
+    app_name = args[0].lower().strip()
+    entity_id = str(update.effective_user.id)
+
+    # Check if already connected
+    if composio_bridge.check_connection(entity_id, app_name):
+        await update.message.reply_text(f"You're already connected to {app_name}!")
+        return
+
+    url = composio_bridge.initiate_connection(entity_id, app_name)
+    if url:
+        await update.message.reply_text(
+            f"Click this link to connect {app_name}:\n\n{url}\n\n"
+            "Once you've authorized, come back and I'll have access."
+        )
+    else:
+        await update.message.reply_text(
+            f"Failed to start connection for {app_name}. "
+            "Make sure COMPOSIO_API_KEY is set and the app name is correct."
+        )
 
 
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -78,6 +111,7 @@ def main() -> None:
     app = ApplicationBuilder().token(token).build()
 
     app.add_handler(CommandHandler("start", start_command))
+    app.add_handler(CommandHandler("connect", connect_command))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
 
     # Check for due reminders every 60 seconds

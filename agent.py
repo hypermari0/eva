@@ -9,6 +9,7 @@ from pathlib import Path
 import httpx
 
 from tools import TOOLS, RUNNERS
+import composio_bridge
 import memory
 
 logger = logging.getLogger(__name__)
@@ -109,7 +110,10 @@ async def chat(user_id: int, user_text: str) -> str:
     memory.save_message(user_id, "user", user_text)
 
     messages = _build_messages(user_id, user_text)
-    tool_list = list(TOOLS.values())
+    entity_id = str(user_id)
+
+    # Merge local tools + Composio tools
+    tool_list = list(TOOLS.values()) + composio_bridge.get_tools(entity_id)
 
     for _ in range(MAX_TOOL_ROUNDS):
         data = await _call_llm(messages, tool_list)
@@ -143,16 +147,22 @@ async def chat(user_id: int, user_text: str) -> str:
             except json.JSONDecodeError:
                 args = {}
 
-            runner = RUNNERS.get(fn_name)
-            if runner is None:
-                result = f"Error: unknown tool '{fn_name}'"
-            else:
+            # Route to Composio or local tool runner
+            if composio_bridge.is_composio_tool(fn_name):
+                try:
+                    result = composio_bridge.execute(fn_name, args, entity_id)
+                except Exception as e:
+                    logger.exception(f"Composio tool {fn_name} failed")
+                    result = f"Error running {fn_name}: {e}"
+            elif fn_name in RUNNERS:
                 try:
                     args["_user_id"] = user_id
-                    result = runner(args)
+                    result = RUNNERS[fn_name](args)
                 except Exception as e:
                     logger.exception(f"Tool {fn_name} failed")
                     result = f"Error running {fn_name}: {e}"
+            else:
+                result = f"Error: unknown tool '{fn_name}'"
 
             messages.append({
                 "role": "tool",

@@ -3,5 +3,4 @@ httpx>=0.27.0
 supabase>=2.0.0
 tavily-python>=0.3.0
 python-dotenv>=1.0.0
-google-api-python-client>=2.0.0
-google-auth>=2.0.0
+composio-core>=0.7.0
