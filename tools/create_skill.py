@@ -1,5 +1,6 @@
-"""Tool: create a new dynamic skill that becomes immediately available."""
+"""Tool: propose a new dynamic skill (requires user approval to activate)."""
 
+import json
 import re
 
 import memory
@@ -10,11 +11,13 @@ TOOL_DEFINITION = {
     "function": {
         "name": "create_skill",
         "description": (
-            "Create a new skill/tool that you can use in future conversations. "
+            "Propose a new skill/tool. The skill will NOT activate immediately — "
+            "the user must approve it first via /approve command. "
+            "After calling this, explain to the user what the skill will do, "
+            "what external APIs it calls, and tell them to send /approve <name> to activate it. "
             "The code runs in a sandbox with access to: json, math, datetime, re, urllib.parse, httpx. "
-            "Use httpx for any HTTP calls (not requests). "
-            "The code should be the body of a function that receives 'args' dict and returns a string. "
-            "Example code: 'import httpx\\nresp = httpx.get(\"https://api.example.com/data\")\\nreturn resp.json()[\"result\"]'"
+            "Use httpx for any HTTP calls. "
+            "The code should be the body of a function that receives 'args' dict and returns a string."
         ),
         "parameters": {
             "type": "object",
@@ -35,13 +38,16 @@ TOOL_DEFINITION = {
                     "type": "string",
                     "description": "Python code for the run function body. Receives 'args' dict. Must return a string.",
                 },
+                "summary": {
+                    "type": "string",
+                    "description": "A short plain-language summary of what this skill does and what external services/APIs it connects to. This is shown to the user for approval.",
+                },
             },
-            "required": ["name", "description", "parameters", "code"],
+            "required": ["name", "description", "parameters", "code", "summary"],
         },
     },
 }
 
-# Static tool names that cannot be overwritten
 RESERVED = {"create_skill", "list_skills", "toggle_skill", "delete_skill",
             "get_current_datetime", "web_search", "create_reminder", "update_user_profile"}
 
@@ -50,7 +56,6 @@ def run(args: dict) -> str:
     name = args["name"]
     user_id = args.get("_user_id")
 
-    # Validate name
     if not re.match(r"^[a-z][a-z0-9_]{1,48}$", name):
         return "Error: name must be snake_case, start with a letter, 2-49 chars."
 
@@ -70,7 +75,7 @@ def run(args: dict) -> str:
     except SyntaxError as e:
         return f"Syntax error in code: {e}"
 
-    # Save to Supabase
+    # Save as pending
     try:
         memory.create_dynamic_skill(
             name=name,
@@ -84,12 +89,10 @@ def run(args: dict) -> str:
             return f"Error: a skill named '{name}' already exists. Delete it first or choose another name."
         return f"Error saving skill: {e}"
 
-    # Register in-memory
-    tools.register_dynamic_skill(
-        name=name,
-        description=args["description"],
-        parameters=args["parameters"],
-        code=code,
+    summary = args.get("summary", args["description"])
+    return (
+        f"Skill '{name}' saved as PENDING (not active yet).\n\n"
+        f"Summary: {summary}\n\n"
+        f"Tell the user to send /approve {name} to activate it, "
+        f"or /reject {name} to discard it."
     )
-
-    return f"Skill '{name}' created and ready to use."

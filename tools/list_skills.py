@@ -23,6 +23,11 @@ def run(_args: dict) -> str:
 
     lines = []
     for s in skills:
-        status = "enabled" if s["enabled"] else "disabled"
+        if s.get("status") == "pending":
+            status = "pending approval"
+        elif s["enabled"]:
+            status = "active"
+        else:
+            status = "disabled"
         lines.append(f"- **{s['name']}** ({status}): {s['description']}")
     return "\n".join(lines)

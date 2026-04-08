@@ -97,6 +97,7 @@ def load_dynamic_skills() -> list[dict]:
         .table("dynamic_skills")
         .select("*")
         .eq("enabled", True)
+        .eq("status", "approved")
         .execute()
     )
     return resp.data
@@ -145,8 +146,31 @@ def list_dynamic_skills() -> list[dict]:
     resp = (
         get_client()
         .table("dynamic_skills")
-        .select("name, description, enabled, created_at")
+        .select("name, description, enabled, status, created_at")
         .order("created_at", desc=True)
         .execute()
     )
     return resp.data
+
+
+def get_dynamic_skill(name: str) -> dict | None:
+    resp = (
+        get_client()
+        .table("dynamic_skills")
+        .select("*")
+        .eq("name", name)
+        .execute()
+    )
+    return resp.data[0] if resp.data else None
+
+
+def approve_dynamic_skill(name: str) -> dict | None:
+    resp = (
+        get_client()
+        .table("dynamic_skills")
+        .update({"status": "approved", "updated_at": datetime.now(timezone.utc).isoformat()})
+        .eq("name", name)
+        .eq("status", "pending")
+        .execute()
+    )
+    return resp.data[0] if resp.data else None

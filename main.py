@@ -21,6 +21,7 @@ import httpx
 import agent
 import composio_bridge
 import memory
+import tools
 
 logging.basicConfig(
     format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
@@ -66,6 +67,59 @@ async def connect_command(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
             f"Failed to start connection for {app_name}. "
             "Make sure COMPOSIO_API_KEY is set and the app name is correct."
         )
+
+
+async def approve_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Handle /approve <skill_name> — activate a pending skill."""
+    if not context.args:
+        await update.message.reply_text("Usage: /approve <skill_name>")
+        return
+
+    name = context.args[0].lower().strip()
+    skill = memory.get_dynamic_skill(name)
+
+    if not skill:
+        await update.message.reply_text(f"No skill named '{name}' found.")
+        return
+
+    if skill["status"] == "approved":
+        await update.message.reply_text(f"'{name}' is already approved and active.")
+        return
+
+    if skill["status"] != "pending":
+        await update.message.reply_text(f"'{name}' is in status '{skill['status']}' and can't be approved.")
+        return
+
+    # Approve in DB
+    memory.approve_dynamic_skill(name)
+
+    # Register in-memory so it's available immediately
+    tools.register_dynamic_skill(
+        name=skill["name"],
+        description=skill["description"],
+        parameters=skill["parameters"],
+        code=skill["code"],
+    )
+
+    await update.message.reply_text(f"Skill '{name}' approved and active. I can use it now.")
+
+
+async def reject_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Handle /reject <skill_name> — discard a pending skill."""
+    if not context.args:
+        await update.message.reply_text("Usage: /reject <skill_name>")
+        return
+
+    name = context.args[0].lower().strip()
+    skill = memory.get_dynamic_skill(name)
+
+    if not skill:
+        await update.message.reply_text(f"No skill named '{name}' found.")
+        return
+
+    memory.delete_dynamic_skill(name)
+    tools.unregister_dynamic_skill(name)
+    await update.message.reply_text(f"Skill '{name}' rejected and discarded.")
 
 
 async def handle_voice(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -159,6 +213,8 @@ def main() -> None:
 
     app.add_handler(CommandHandler("start", start_command))
     app.add_handler(CommandHandler("connect", connect_command))
+    app.add_handler(CommandHandler("approve", approve_command))
+    app.add_handler(CommandHandler("reject", reject_command))
     app.add_handler(MessageHandler(filters.VOICE | filters.AUDIO, handle_voice))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
 

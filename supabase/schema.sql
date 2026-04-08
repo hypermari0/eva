@@ -37,6 +37,7 @@ create table if not exists dynamic_skills (
     parameters jsonb not null default '{}',
     code text not null,
     enabled boolean not null default true,
+    status text not null default 'pending' check (status in ('pending', 'approved')),
     created_by bigint not null,
     created_at timestamptz not null default now(),
     updated_at timestamptz not null default now()
