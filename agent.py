@@ -15,8 +15,15 @@ import memory
 logger = logging.getLogger(__name__)
 
 OPENROUTER_URL = "https://openrouter.ai/api/v1/chat/completions"
-MODEL = "mistralai/mistral-small-2603"
+DEFAULT_MODEL = "mistralai/mistral-small-2603"
 MAX_TOOL_ROUNDS = 5
+
+
+def get_model() -> str:
+    try:
+        return memory.get_setting("model", DEFAULT_MODEL)
+    except Exception:
+        return DEFAULT_MODEL
 
 _soul: str | None = None
 _prompt_template: str | None = None
@@ -65,7 +72,7 @@ def _build_messages(user_id: int, user_text: str) -> list[dict]:
 
 async def _call_llm(messages: list[dict], tools: list[dict]) -> dict:
     payload = {
-        "model": MODEL,
+        "model": get_model(),
         "messages": messages,
         "tools": tools or None,
         "max_tokens": 4096,

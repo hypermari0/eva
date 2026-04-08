@@ -89,6 +89,21 @@ def save_user_profile(user_id: int, profile: str) -> None:
     }).execute()
 
 
+# --- Settings ---
+
+def get_setting(key: str, default: str = "") -> str:
+    resp = get_client().table("settings").select("value").eq("key", key).execute()
+    return resp.data[0]["value"] if resp.data else default
+
+
+def set_setting(key: str, value: str) -> None:
+    get_client().table("settings").upsert({
+        "key": key,
+        "value": value,
+        "updated_at": datetime.now(timezone.utc).isoformat(),
+    }).execute()
+
+
 # --- Dynamic skills ---
 
 def load_dynamic_skills() -> list[dict]:
