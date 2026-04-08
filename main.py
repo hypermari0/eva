@@ -2,6 +2,8 @@
 
 import logging
 import os
+import time
+from collections import defaultdict
 
 from dotenv import load_dotenv
 
@@ -31,14 +33,46 @@ logger = logging.getLogger(__name__)
 
 REMINDER_CHECK_INTERVAL = 60  # seconds
 
+# --- Access control ---
+_allowed_ids_raw = os.environ.get("ALLOWED_USER_IDS", "")
+ALLOWED_USER_IDS: set[int] = {
+    int(uid.strip()) for uid in _allowed_ids_raw.split(",") if uid.strip()
+}
+
+# --- Rate limiting ---
+RATE_LIMIT_MESSAGES = int(os.environ.get("RATE_LIMIT_MESSAGES", "10"))  # per window
+RATE_LIMIT_WINDOW = int(os.environ.get("RATE_LIMIT_WINDOW", "60"))  # seconds
+_user_message_times: dict[int, list[float]] = defaultdict(list)
+
+
+def _is_allowed(user_id: int) -> bool:
+    """Check if a user is in the allowlist. If no allowlist is set, allow all."""
+    return not ALLOWED_USER_IDS or user_id in ALLOWED_USER_IDS
+
+
+def _is_rate_limited(user_id: int) -> bool:
+    """Check if a user has exceeded the message rate limit."""
+    now = time.monotonic()
+    times = _user_message_times[user_id]
+    # Prune old entries
+    _user_message_times[user_id] = [t for t in times if now - t < RATE_LIMIT_WINDOW]
+    if len(_user_message_times[user_id]) >= RATE_LIMIT_MESSAGES:
+        return True
+    _user_message_times[user_id].append(now)
+    return False
+
 
 async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    if not _is_allowed(update.effective_user.id):
+        return
     reply = await agent.chat(update.effective_user.id, "/start")
     await update.message.reply_text(reply)
 
 
 async def connect_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Handle /connect <app> — initiate OAuth for an external service."""
+    if not _is_allowed(update.effective_user.id):
+        return
     args = context.args
     if not args:
         await update.message.reply_text(
@@ -71,6 +105,8 @@ async def connect_command(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
 
 async def approve_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Handle /approve <skill_name> — activate a pending skill."""
+    if not _is_allowed(update.effective_user.id):
+        return
     if not context.args:
         await update.message.reply_text("Usage: /approve <skill_name>")
         return
@@ -90,6 +126,11 @@ async def approve_command(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
         await update.message.reply_text(f"'{name}' is in status '{skill['status']}' and can't be approved.")
         return
 
+    # Only the user who created the skill (or an admin) can approve it
+    if skill["created_by"] != update.effective_user.id:
+        await update.message.reply_text("You can only approve skills you created.")
+        return
+
     # Approve in DB
     memory.approve_dynamic_skill(name)
 
@@ -106,6 +147,8 @@ async def approve_command(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
 
 async def reject_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Handle /reject <skill_name> — discard a pending skill."""
+    if not _is_allowed(update.effective_user.id):
+        return
     if not context.args:
         await update.message.reply_text("Usage: /reject <skill_name>")
         return
@@ -129,6 +172,11 @@ async def handle_voice(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
         return
 
     user_id = update.effective_user.id
+    if not _is_allowed(user_id):
+        return
+    if _is_rate_limited(user_id):
+        await update.message.reply_text("You're sending messages too fast. Please wait a moment.")
+        return
     await update.message.chat.send_action("typing")
 
     try:
@@ -172,6 +220,12 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
         return
 
     user_id = update.effective_user.id
+    if not _is_allowed(user_id):
+        return
+    if _is_rate_limited(user_id):
+        await update.message.reply_text("You're sending messages too fast. Please wait a moment.")
+        return
+
     text = update.message.text
 
     await update.message.chat.send_action("typing")

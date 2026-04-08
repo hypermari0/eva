@@ -131,7 +131,7 @@ async def chat(user_id: int, user_text: str) -> str:
 
     for _ in range(MAX_TOOL_ROUNDS):
         data = await _call_llm(messages, tool_list)
-        logger.info(f"LLM response: {json.dumps(data, default=str)[:1000]}")
+        logger.debug(f"LLM response: {json.dumps(data, default=str)[:1000]}")
 
         choices = data.get("choices")
         if not choices:
@@ -165,16 +165,16 @@ async def chat(user_id: int, user_text: str) -> str:
             if composio_bridge.is_composio_tool(fn_name):
                 try:
                     result = composio_bridge.execute(fn_name, args, entity_id)
-                except Exception as e:
+                except Exception:
                     logger.exception(f"Composio tool {fn_name} failed")
-                    result = f"Error running {fn_name}: {e}"
+                    result = f"Error: {fn_name} failed. Please try again."
             elif fn_name in RUNNERS:
                 try:
                     args["_user_id"] = user_id
                     result = RUNNERS[fn_name](args)
-                except Exception as e:
+                except Exception:
                     logger.exception(f"Tool {fn_name} failed")
-                    result = f"Error running {fn_name}: {e}"
+                    result = f"Error: {fn_name} failed. Please try again."
             else:
                 result = f"Error: unknown tool '{fn_name}'"
 

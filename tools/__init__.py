@@ -7,10 +7,11 @@ Every .py file in this folder (except __init__.py) is expected to expose:
 Dynamic skills are loaded from Supabase and executed in a sandbox.
 """
 
+import ast
 import importlib
 import logging
 import pkgutil
-import signal
+from concurrent.futures import ThreadPoolExecutor, TimeoutError as FuturesTimeout
 from pathlib import Path
 
 logger = logging.getLogger(__name__)
@@ -22,9 +23,57 @@ DYNAMIC_SKILLS: set[str] = set()  # names of dynamic (not static) tools
 ALLOWED_IMPORTS = {"json", "math", "datetime", "re", "urllib.parse", "httpx"}
 DYNAMIC_TIMEOUT = 10  # seconds
 
+# Dunder attributes that allow sandbox escapes (class walking, globals access, etc.)
+_BLOCKED_ATTRS = frozenset({
+    "__class__", "__bases__", "__subclasses__", "__mro__",
+    "__globals__", "__code__", "__closure__", "__func__",
+    "__self__", "__builtins__", "__import__", "__loader__",
+    "__spec__", "__qualname__", "__module__", "__dict__",
+    "__init_subclass__", "__set_name__", "__reduce__",
+    "__reduce_ex__", "__getattr__", "__setattr__", "__delattr__",
+})
+
+
+def _validate_code_ast(code_str: str) -> None:
+    """Validate dynamic skill code doesn't use dangerous patterns."""
+    wrapped = f"def _f(args):\n"
+    for line in code_str.split("\n"):
+        wrapped += f"    {line}\n"
+
+    tree = ast.parse(wrapped)
+
+    for node in ast.walk(tree):
+        # Block access to dunder attributes: obj.__class__, obj.__globals__, etc.
+        if isinstance(node, ast.Attribute) and node.attr in _BLOCKED_ATTRS:
+            raise ValueError(
+                f"Forbidden attribute access: '{node.attr}' is not allowed in dynamic skills"
+            )
+
+        # Block string literals that look like dunder smuggling via getattr
+        if isinstance(node, ast.Constant) and isinstance(node.value, str):
+            if node.value in _BLOCKED_ATTRS:
+                raise ValueError(
+                    f"Forbidden string literal: '{node.value}' suggests attribute smuggling"
+                )
+
+        # Block eval/exec/compile/getattr/setattr/delattr calls
+        if isinstance(node, ast.Call):
+            func = node.func
+            if isinstance(func, ast.Name) and func.id in (
+                "eval", "exec", "compile", "getattr", "setattr", "delattr",
+                "vars", "dir", "globals", "locals", "breakpoint",
+                "__import__", "open",
+            ):
+                raise ValueError(
+                    f"Forbidden function call: '{func.id}' is not allowed in dynamic skills"
+                )
+
 
 def _make_runner(code_str: str):
     """Wrap a code string into a sandboxed run(args) function."""
+    # Validate code safety at the AST level before compiling
+    _validate_code_ast(code_str)
+
     wrapped = "def _dynamic_run(args):\n"
     for line in code_str.split("\n"):
         wrapped += f"    {line}\n"
@@ -35,7 +84,7 @@ def _make_runner(code_str: str):
         "len": len, "range": range, "enumerate": enumerate,
         "zip": zip, "map": map, "filter": filter, "sorted": sorted,
         "min": min, "max": max, "sum": sum, "abs": abs, "round": round,
-        "isinstance": isinstance, "type": type,
+        "isinstance": isinstance,
         "True": True, "False": False, "None": None,
         "print": lambda *a, **kw: None,  # no-op
         "Exception": Exception, "ValueError": ValueError,
@@ -55,18 +104,16 @@ def _make_runner(code_str: str):
 
     inner_fn = namespace["_dynamic_run"]
 
-    def _timed_runner(args: dict) -> str:
-        def _timeout_handler(signum, frame):
-            raise TimeoutError("Dynamic skill timed out (10s limit)")
+    _executor = ThreadPoolExecutor(max_workers=1)
 
-        old_handler = signal.signal(signal.SIGALRM, _timeout_handler)
-        signal.alarm(DYNAMIC_TIMEOUT)
+    def _timed_runner(args: dict) -> str:
+        future = _executor.submit(inner_fn, args)
         try:
-            result = inner_fn(args)
+            result = future.result(timeout=DYNAMIC_TIMEOUT)
             return str(result) if result is not None else ""
-        finally:
-            signal.alarm(0)
-            signal.signal(signal.SIGALRM, old_handler)
+        except FuturesTimeout:
+            future.cancel()
+            raise TimeoutError("Dynamic skill timed out (10s limit)")
 
     return _timed_runner
 

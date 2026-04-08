@@ -43,6 +43,13 @@ create table if not exists dynamic_skills (
     updated_at timestamptz not null default now()
 );
 
--- Enable RLS (optional — disable if using service key)
--- alter table messages enable row level security;
--- alter table reminders enable row level security;
+-- RLS enabled on all tables. service_role bypasses RLS; anon is blocked.
+alter table messages enable row level security;
+alter table reminders enable row level security;
+alter table user_profiles enable row level security;
+alter table dynamic_skills enable row level security;
+
+create policy "Deny anon access to messages" on messages for all to anon using (false);
+create policy "Deny anon access to reminders" on reminders for all to anon using (false);
+create policy "Deny anon access to user_profiles" on user_profiles for all to anon using (false);
+create policy "Deny anon access to dynamic_skills" on dynamic_skills for all to anon using (false);

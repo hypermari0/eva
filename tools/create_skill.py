@@ -65,7 +65,7 @@ def run(args: dict) -> str:
     if name in tools.TOOLS and name not in tools.DYNAMIC_SKILLS:
         return f"Error: '{name}' conflicts with a built-in tool."
 
-    # Syntax check
+    # Syntax check + security validation
     code = args["code"]
     wrapped = "def _test(args):\n"
     for line in code.split("\n"):
@@ -74,6 +74,12 @@ def run(args: dict) -> str:
         compile(wrapped, "<dynamic-skill>", "exec")
     except SyntaxError as e:
         return f"Syntax error in code: {e}"
+
+    try:
+        from tools import _validate_code_ast
+        _validate_code_ast(code)
+    except ValueError as e:
+        return f"Security validation failed: {e}"
 
     # Save as pending
     try:
