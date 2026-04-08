@@ -16,6 +16,8 @@ from telegram.ext import (
     filters,
 )
 
+import httpx
+
 import agent
 import composio_bridge
 import memory
@@ -66,6 +68,51 @@ async def connect_command(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
         )
 
 
+async def handle_voice(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Handle voice/audio messages — transcribe via Groq Whisper, then process as text."""
+    voice = update.message.voice or update.message.audio
+    if not voice:
+        return
+
+    user_id = update.effective_user.id
+    await update.message.chat.send_action("typing")
+
+    try:
+        # Download voice file from Telegram
+        file = await context.bot.get_file(voice.file_id)
+        buf = bytearray()
+        await file.download_as_bytearray(buf)
+
+        # Transcribe via Groq Whisper API
+        groq_key = os.environ.get("GROQ_API_KEY")
+        if not groq_key:
+            await update.message.reply_text("Voice messages aren't configured yet (missing GROQ_API_KEY).")
+            return
+
+        async with httpx.AsyncClient(timeout=60) as client:
+            resp = await client.post(
+                "https://api.groq.com/openai/v1/audio/transcriptions",
+                headers={"Authorization": f"Bearer {groq_key}"},
+                files={"file": ("voice.ogg", bytes(buf), "audio/ogg")},
+                data={"model": "whisper-large-v3"},
+            )
+            resp.raise_for_status()
+            text = resp.json()["text"]
+
+        if not text.strip():
+            await update.message.reply_text("I couldn't understand the audio. Could you try again?")
+            return
+
+        # Process transcribed text through the normal agent flow
+        reply = await agent.chat(user_id, text)
+    except Exception:
+        logger.exception("Error processing voice message")
+        reply = "Sorry, something went wrong processing your voice message."
+
+    for i in range(0, len(reply), 4096):
+        await update.message.reply_text(reply[i : i + 4096])
+
+
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     if not update.message or not update.message.text:
         return
@@ -112,6 +159,7 @@ def main() -> None:
 
     app.add_handler(CommandHandler("start", start_command))
     app.add_handler(CommandHandler("connect", connect_command))
+    app.add_handler(MessageHandler(filters.VOICE | filters.AUDIO, handle_voice))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
 
     # Check for due reminders every 60 seconds

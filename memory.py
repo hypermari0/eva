@@ -87,3 +87,66 @@ def save_user_profile(user_id: int, profile: str) -> None:
         "profile": profile,
         "updated_at": datetime.now(timezone.utc).isoformat(),
     }).execute()
+
+
+# --- Dynamic skills ---
+
+def load_dynamic_skills() -> list[dict]:
+    resp = (
+        get_client()
+        .table("dynamic_skills")
+        .select("*")
+        .eq("enabled", True)
+        .execute()
+    )
+    return resp.data
+
+
+def create_dynamic_skill(name: str, description: str, parameters: dict, code: str, created_by: int) -> dict:
+    resp = (
+        get_client()
+        .table("dynamic_skills")
+        .insert({
+            "name": name,
+            "description": description,
+            "parameters": parameters,
+            "code": code,
+            "created_by": created_by,
+        })
+        .execute()
+    )
+    return resp.data[0]
+
+
+def update_dynamic_skill(name: str, **fields) -> dict:
+    fields["updated_at"] = datetime.now(timezone.utc).isoformat()
+    resp = (
+        get_client()
+        .table("dynamic_skills")
+        .update(fields)
+        .eq("name", name)
+        .execute()
+    )
+    return resp.data[0] if resp.data else {}
+
+
+def delete_dynamic_skill(name: str) -> bool:
+    resp = (
+        get_client()
+        .table("dynamic_skills")
+        .delete()
+        .eq("name", name)
+        .execute()
+    )
+    return len(resp.data) > 0
+
+
+def list_dynamic_skills() -> list[dict]:
+    resp = (
+        get_client()
+        .table("dynamic_skills")
+        .select("name, description, enabled, created_at")
+        .order("created_at", desc=True)
+        .execute()
+    )
+    return resp.data

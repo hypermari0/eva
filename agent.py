@@ -8,7 +8,7 @@ from pathlib import Path
 
 import httpx
 
-from tools import TOOLS, RUNNERS
+from tools import TOOLS, RUNNERS, load_dynamic_skills
 import composio_bridge
 import memory
 
@@ -20,6 +20,7 @@ MAX_TOOL_ROUNDS = 5
 
 _soul: str | None = None
 _prompt_template: str | None = None
+_dynamic_loaded = False
 
 
 def _load_templates() -> None:
@@ -106,6 +107,12 @@ async def _call_llm(messages: list[dict], tools: list[dict]) -> dict:
 
 async def chat(user_id: int, user_text: str) -> str:
     """Process a user message: load history, call LLM with tool loop, return final text."""
+    # Load dynamic skills once (deferred to avoid import-time Supabase call)
+    global _dynamic_loaded
+    if not _dynamic_loaded:
+        load_dynamic_skills()
+        _dynamic_loaded = True
+
     # Save user message
     memory.save_message(user_id, "user", user_text)
 

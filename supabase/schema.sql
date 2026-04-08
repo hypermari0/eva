@@ -29,6 +29,19 @@ create table if not exists user_profiles (
     updated_at timestamptz not null default now()
 );
 
+-- Dynamic skills: LLM-generated tools stored in the DB
+create table if not exists dynamic_skills (
+    id bigint generated always as identity primary key,
+    name text unique not null,
+    description text not null,
+    parameters jsonb not null default '{}',
+    code text not null,
+    enabled boolean not null default true,
+    created_by bigint not null,
+    created_at timestamptz not null default now(),
+    updated_at timestamptz not null default now()
+);
+
 -- Enable RLS (optional — disable if using service key)
 -- alter table messages enable row level security;
 -- alter table reminders enable row level security;
