@@ -15,7 +15,7 @@ import memory
 logger = logging.getLogger(__name__)
 
 OPENROUTER_URL = "https://openrouter.ai/api/v1/chat/completions"
-MODEL = "google/gemma-4-31b-it"
+MODEL = "mistralai/mistral-small-2603"
 MAX_TOOL_ROUNDS = 5
 
 _soul: str | None = None
