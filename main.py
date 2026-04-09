@@ -68,65 +68,74 @@ def _is_rate_limited(user_id: int) -> bool:
 def _md_to_html(text: str) -> str:
     """Convert common Markdown from LLM output to Telegram-compatible HTML.
 
-    Handles: **bold**, *italic*, `inline code`, ```code blocks```, [links](url),
-    ### headings (→ bold), --- (→ removed), markdown tables (→ clean lines).
+    Telegram requires strictly nested HTML tags (no overlapping).
+    We handle this by processing markers from inside-out:
+    ***bold+italic*** first, then **bold**, then *italic*.
     """
     import html as html_mod
 
-    # Step 1 — protect code blocks/inline code before escaping HTML entities
-    code_blocks: list[str] = []
+    # Step 1 — stash code blocks and inline code (protect from processing)
+    stashed: list[tuple[str, str]] = []  # (placeholder, html)
 
-    def _stash_code_block(m: re.Match) -> str:
-        code_blocks.append(m.group(1))
-        return f"\x00CODEBLOCK{len(code_blocks) - 1}\x00"
+    def _stash(html_str: str) -> str:
+        idx = len(stashed)
+        placeholder = f"\x00STASH{idx}\x00"
+        stashed.append((placeholder, html_str))
+        return placeholder
 
-    inline_codes: list[str] = []
+    # Code blocks (```...```)
+    def _sub_code_block(m: re.Match) -> str:
+        return _stash(f"<pre>{html_mod.escape(m.group(1))}</pre>")
 
-    def _stash_inline_code(m: re.Match) -> str:
-        inline_codes.append(m.group(1))
-        return f"\x00INLINE{len(inline_codes) - 1}\x00"
+    text = re.sub(r"```(?:\w*\n)?(.*?)```", _sub_code_block, text, flags=re.DOTALL)
 
-    # Stash code blocks first (```...```), then inline (`...`)
-    text = re.sub(r"```(?:\w*\n)?(.*?)```", _stash_code_block, text, flags=re.DOTALL)
-    text = re.sub(r"`([^`]+)`", _stash_inline_code, text)
+    # Inline code (`...`)
+    def _sub_inline_code(m: re.Match) -> str:
+        return _stash(f"<code>{html_mod.escape(m.group(1))}</code>")
 
-    # Step 2 — handle Markdown structure before HTML-escaping
-    # Remove horizontal rules
+    text = re.sub(r"`([^`]+)`", _sub_inline_code, text)
+
+    # Step 2 — structural Markdown (headings, rules, tables)
     text = re.sub(r"^-{3,}$", "", text, flags=re.MULTILINE)
 
-    # Convert ### headings to bold (Telegram has no heading support)
     def _heading_to_bold(m: re.Match) -> str:
         content = m.group(1).strip()
-        # Strip existing ** wrapping to avoid double-bold
         if content.startswith("**") and content.endswith("**"):
             content = content[2:-2]
         return f"**{content}**"
 
     text = re.sub(r"^#{1,6}\s+(.+)$", _heading_to_bold, text, flags=re.MULTILINE)
+    text = re.sub(r"^\|[-\s|:]+\|$", "", text, flags=re.MULTILINE)
+    text = re.sub(r"^\|\s*(.+?)\s*\|$", r"\1", text, flags=re.MULTILINE)
 
-    # Convert markdown tables: remove separator rows, strip leading/trailing pipes
-    text = re.sub(r"^\|[-\s|:]+\|$", "", text, flags=re.MULTILINE)  # separator rows
-    text = re.sub(r"^\|\s*(.+?)\s*\|$", r"\1", text, flags=re.MULTILINE)  # data rows
-
-    # Step 3 — HTML-escape the rest (only <, >, & matter for Telegram HTML)
+    # Step 3 — HTML-escape plain text
     text = html_mod.escape(text)
 
-    # Step 4 — convert Markdown formatting to HTML tags
-    text = re.sub(r"\*\*(.+?)\*\*", r"<b>\1</b>", text)
+    # Step 4 — convert Markdown formatting to HTML tags (inside-out to avoid overlap)
+    # Bold+italic (***text*** or ___text___) → properly nested <b><i>...</i></b>
+    text = re.sub(r"\*\*\*(.+?)\*\*\*", r"<b><i>\1</i></b>", text)
+    text = re.sub(r"___(.+?)___", r"<b><i>\1</i></b>", text)
+
+    # Bold (**text** or __text__) — replace with stashed placeholder to prevent
+    # the italic pass from matching leftover * inside bold content
+    def _sub_bold(m: re.Match) -> str:
+        return _stash(f"<b>{m.group(1)}</b>")
+
+    text = re.sub(r"\*\*(.+?)\*\*", _sub_bold, text)
+    text = re.sub(r"__(.+?)__", _sub_bold, text)
+
+    # Italic (*text* or _text_) — safe now that bold spans are stashed
     text = re.sub(r"(?<!\w)\*(.+?)\*(?!\w)", r"<i>\1</i>", text)
-    text = re.sub(r"__(.+?)__", r"<b>\1</b>", text)
     text = re.sub(r"(?<!\w)_(.+?)_(?!\w)", r"<i>\1</i>", text)
+
+    # Links
     text = re.sub(r"\[([^\]]+)\]\(([^)]+)\)", r'<a href="\2">\1</a>', text)
 
-    # Step 5 — restore code blocks and inline code with HTML tags
-    for i, code in enumerate(inline_codes):
-        text = text.replace(f"\x00INLINE{i}\x00", f"<code>{html_mod.escape(code)}</code>")
-    for i, code in enumerate(code_blocks):
-        text = text.replace(f"\x00CODEBLOCK{i}\x00", f"<pre>{html_mod.escape(code)}</pre>")
+    # Step 5 — restore all stashed placeholders
+    for placeholder, html_str in stashed:
+        text = text.replace(placeholder, html_str)
 
-    # Clean up excessive blank lines
     text = re.sub(r"\n{3,}", "\n\n", text)
-
     return text
 
 
