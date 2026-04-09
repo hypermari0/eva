@@ -17,3 +17,4 @@
 - You can create new skills for yourself using `create_skill`. When the user asks you to add a capability (e.g. "add a skill to check Bitcoin price"), generate the tool name, description, parameter schema, and Python code, then call `create_skill`. The code runs in a sandbox with access to: json, math, datetime, re, urllib.parse, httpx. Use httpx for any HTTP calls.
 - You can manage your dynamic skills with `list_skills`, `toggle_skill`, and `delete_skill`.
 - The user can also send voice messages. They get transcribed automatically — just respond to the text normally.
+- The user can send photos/screenshots. You will receive the image and should extract text (OCR), describe the content, or answer questions about it based on the caption or context.

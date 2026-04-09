@@ -62,11 +62,12 @@ def _headers() -> dict:
     }
 
 
-def _build_messages(user_id: int, user_text: str) -> list[dict]:
+def _build_messages(user_id: int, user_content) -> list[dict]:
+    """Build the message list. user_content can be a string or a list (multimodal)."""
     history = memory.load_history(user_id)
     messages = [{"role": "system", "content": build_system_prompt(user_id)}]
     messages.extend(history)
-    messages.append({"role": "user", "content": user_text})
+    messages.append({"role": "user", "content": user_content})
     return messages
 
 
@@ -112,18 +113,37 @@ async def _call_llm(messages: list[dict], tools: list[dict]) -> dict:
         return resp.json()
 
 
-async def chat(user_id: int, user_text: str) -> str:
-    """Process a user message: load history, call LLM with tool loop, return final text."""
+async def chat(user_id: int, user_text: str, image_base64: str | None = None) -> str:
+    """Process a user message: load history, call LLM with tool loop, return final text.
+
+    If image_base64 is provided, sends a multimodal message with the image for OCR/vision.
+    """
     # Load dynamic skills once (deferred to avoid import-time Supabase call)
     global _dynamic_loaded
     if not _dynamic_loaded:
         load_dynamic_skills()
         _dynamic_loaded = True
 
-    # Save user message
-    memory.save_message(user_id, "user", user_text)
+    # Save user message (text part only for history)
+    save_text = user_text or "(image)"
+    memory.save_message(user_id, "user", save_text)
 
-    messages = _build_messages(user_id, user_text)
+    # Build content: multimodal if image is attached
+    if image_base64:
+        content = []
+        if user_text:
+            content.append({"type": "text", "text": user_text})
+        else:
+            content.append({"type": "text", "text": "Please describe and extract all text from this image."})
+        content.append({
+            "type": "image_url",
+            "image_url": {"url": f"data:image/jpeg;base64,{image_base64}"},
+        })
+        user_content = content
+    else:
+        user_content = user_text
+
+    messages = _build_messages(user_id, user_content)
     entity_id = str(user_id)
 
     # Merge local tools + Composio tools

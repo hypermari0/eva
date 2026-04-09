@@ -24,7 +24,7 @@ def _init():
         return
 
     try:
-        from composio import ComposioToolSet, App
+        from composio import ComposioToolSet
         _toolset = ComposioToolSet(api_key=api_key)
         _composio_available = True
         logger.info("Composio initialized")
@@ -41,24 +41,34 @@ def get_tools(entity_id: str) -> list[dict]:
 
     try:
         from composio import App
-        tools = _toolset.get_tools(
+        action_models = _toolset.get_action_schemas(
             apps=[App.GOOGLECALENDAR],
-            entity_id=entity_id,
         )
 
         result = []
-        for tool in tools:
-            # Composio returns OpenAI-compatible schemas
-            if isinstance(tool, dict):
-                schema = tool
-            else:
-                # Some versions return objects with a .model_dump() method
-                schema = tool.model_dump() if hasattr(tool, "model_dump") else tool.dict()
+        for action in action_models:
+            name = action.name
+            if not name:
+                continue
 
-            name = schema.get("function", {}).get("name", "")
-            if name:
-                _action_map[name] = name  # store for execution lookup
-                result.append(schema)
+            # Convert ActionModel to OpenAI-compatible function schema
+            params = action.parameters
+            schema = {
+                "type": "function",
+                "function": {
+                    "name": name,
+                    "description": action.description or "",
+                    "parameters": {
+                        "type": params.type if params else "object",
+                        "properties": params.properties if params else {},
+                    },
+                },
+            }
+            if params and params.required:
+                schema["function"]["parameters"]["required"] = params.required
+
+            _action_map[name] = name
+            result.append(schema)
 
         logger.info(f"Loaded {len(result)} Composio tools for entity {entity_id}")
         return result
@@ -84,7 +94,7 @@ def execute(tool_name: str, args: dict, entity_id: str) -> str:
         result = _toolset.execute_action(
             action=tool_name,
             params=params,
-            entity_id=entity_id,
+            entity_id=str(entity_id),
         )
 
         # Result can be a dict or string

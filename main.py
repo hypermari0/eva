@@ -1,7 +1,9 @@
 """Eva — Telegram bot entry point."""
 
+import base64
 import logging
 import os
+import re
 import time
 from collections import defaultdict
 
@@ -10,6 +12,7 @@ from dotenv import load_dotenv
 load_dotenv()
 
 from telegram import Update
+from telegram.constants import ParseMode
 from telegram.ext import (
     ApplicationBuilder,
     CommandHandler,
@@ -62,11 +65,69 @@ def _is_rate_limited(user_id: int) -> bool:
     return False
 
 
+def _md_to_html(text: str) -> str:
+    """Convert common Markdown from LLM output to Telegram-compatible HTML.
+
+    Handles: **bold**, *italic*, `inline code`, ```code blocks```, [links](url).
+    Plain-text characters that are special in HTML (<, >, &) are escaped first.
+    """
+    import html as html_mod
+
+    # Step 1 — protect code blocks/inline code before escaping HTML entities
+    code_blocks: list[str] = []
+
+    def _stash_code_block(m: re.Match) -> str:
+        code_blocks.append(m.group(1))
+        return f"\x00CODEBLOCK{len(code_blocks) - 1}\x00"
+
+    inline_codes: list[str] = []
+
+    def _stash_inline_code(m: re.Match) -> str:
+        inline_codes.append(m.group(1))
+        return f"\x00INLINE{len(inline_codes) - 1}\x00"
+
+    # Stash code blocks first (```...```), then inline (`...`)
+    text = re.sub(r"```(?:\w*\n)?(.*?)```", _stash_code_block, text, flags=re.DOTALL)
+    text = re.sub(r"`([^`]+)`", _stash_inline_code, text)
+
+    # Step 2 — HTML-escape the rest (only <, >, & matter for Telegram HTML)
+    text = html_mod.escape(text)
+
+    # Step 3 — convert Markdown formatting to HTML tags
+    text = re.sub(r"\*\*(.+?)\*\*", r"<b>\1</b>", text)
+    text = re.sub(r"\*(.+?)\*", r"<i>\1</i>", text)
+    text = re.sub(r"__(.+?)__", r"<b>\1</b>", text)  # __ as bold (common in LLM output)
+    text = re.sub(r"(?<!\w)_(.+?)_(?!\w)", r"<i>\1</i>", text)
+    text = re.sub(r"\[([^\]]+)\]\(([^)]+)\)", r'<a href="\2">\1</a>', text)
+
+    # Step 4 — restore code blocks and inline code with HTML tags
+    for i, code in enumerate(inline_codes):
+        text = text.replace(f"\x00INLINE{i}\x00", f"<code>{html_mod.escape(code)}</code>")
+    for i, code in enumerate(code_blocks):
+        text = text.replace(f"\x00CODEBLOCK{i}\x00", f"<pre>{html_mod.escape(code)}</pre>")
+
+    return text
+
+
+async def _send_reply(message, text: str) -> None:
+    """Send a reply as Telegram HTML, falling back to plain text on failure."""
+    html_text = _md_to_html(text)
+    for i in range(0, len(html_text), 4096):
+        chunk = html_text[i : i + 4096]
+        try:
+            await message.reply_text(chunk, parse_mode=ParseMode.HTML)
+        except Exception:
+            # Fallback: send the original plain text for this chunk
+            plain_start = i  # approximate — lengths may differ slightly
+            plain_chunk = text[plain_start : plain_start + 4096] if plain_start < len(text) else chunk
+            await message.reply_text(plain_chunk)
+
+
 async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     if not _is_allowed(update.effective_user.id):
         return
     reply = await agent.chat(update.effective_user.id, "/start")
-    await update.message.reply_text(reply)
+    await _send_reply(update.message, reply)
 
 
 async def connect_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -211,8 +272,41 @@ async def handle_voice(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
         logger.exception("Error processing voice message")
         reply = "Sorry, something went wrong processing your voice message."
 
-    for i in range(0, len(reply), 4096):
-        await update.message.reply_text(reply[i : i + 4096])
+    await _send_reply(update.message, reply)
+
+
+async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Handle photo/image messages — download, base64-encode, and send to LLM for OCR/vision."""
+    if not update.message or not update.message.photo:
+        return
+
+    user_id = update.effective_user.id
+    if not _is_allowed(user_id):
+        return
+    if _is_rate_limited(user_id):
+        await update.message.reply_text("You're sending messages too fast. Please wait a moment.")
+        return
+    await update.message.chat.send_action("typing")
+
+    try:
+        # Get the highest-resolution version of the photo
+        photo = update.message.photo[-1]
+        file = await context.bot.get_file(photo.file_id)
+        buf = bytearray()
+        await file.download_as_bytearray(buf)
+
+        # Base64-encode for the multimodal LLM call
+        img_b64 = base64.b64encode(bytes(buf)).decode("utf-8")
+
+        # Use caption as the user's text prompt, if any
+        caption = update.message.caption or ""
+
+        reply = await agent.chat(user_id, caption, image_base64=img_b64)
+    except Exception:
+        logger.exception("Error processing photo message")
+        reply = "Sorry, something went wrong processing your image."
+
+    await _send_reply(update.message, reply)
 
 
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -236,9 +330,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
         logger.exception("Error processing message")
         reply = "Sorry, something went wrong. Please try again."
 
-    # Telegram has a 4096-char limit per message
-    for i in range(0, len(reply), 4096):
-        await update.message.reply_text(reply[i : i + 4096])
+    await _send_reply(update.message, reply)
 
 
 async def check_reminders(context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -270,6 +362,7 @@ def main() -> None:
     app.add_handler(CommandHandler("approve", approve_command))
     app.add_handler(CommandHandler("reject", reject_command))
     app.add_handler(MessageHandler(filters.VOICE | filters.AUDIO, handle_voice))
+    app.add_handler(MessageHandler(filters.PHOTO, handle_photo))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
 
     # Check for due reminders every 60 seconds
