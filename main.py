@@ -65,39 +65,18 @@ def _is_rate_limited(user_id: int) -> bool:
     return False
 
 
-def _md_to_html(text: str) -> str:
-    """Convert common Markdown from LLM output to Telegram-compatible HTML.
+def _preprocess_markdown(text: str) -> str:
+    """Pre-process LLM markdown before passing to telegramify-markdown.
 
-    Telegram requires strictly nested HTML tags (no overlapping).
-    We handle this by processing markers from inside-out:
-    ***bold+italic*** first, then **bold**, then *italic*.
+    Handles structures that the library doesn't convert well:
+    - ### headings → bold text (Telegram has no heading support)
+    - --- horizontal rules → removed
+    - Markdown tables → simplified plain lines
     """
-    import html as html_mod
-
-    # Step 1 — stash code blocks and inline code (protect from processing)
-    stashed: list[tuple[str, str]] = []  # (placeholder, html)
-
-    def _stash(html_str: str) -> str:
-        idx = len(stashed)
-        placeholder = f"\x00STASH{idx}\x00"
-        stashed.append((placeholder, html_str))
-        return placeholder
-
-    # Code blocks (```...```)
-    def _sub_code_block(m: re.Match) -> str:
-        return _stash(f"<pre>{html_mod.escape(m.group(1))}</pre>")
-
-    text = re.sub(r"```(?:\w*\n)?(.*?)```", _sub_code_block, text, flags=re.DOTALL)
-
-    # Inline code (`...`)
-    def _sub_inline_code(m: re.Match) -> str:
-        return _stash(f"<code>{html_mod.escape(m.group(1))}</code>")
-
-    text = re.sub(r"`([^`]+)`", _sub_inline_code, text)
-
-    # Step 2 — structural Markdown (headings, rules, tables)
+    # Remove horizontal rules
     text = re.sub(r"^-{3,}$", "", text, flags=re.MULTILINE)
 
+    # Convert headings to bold (strip existing ** wrapper if present)
     def _heading_to_bold(m: re.Match) -> str:
         content = m.group(1).strip()
         if content.startswith("**") and content.endswith("**"):
@@ -105,38 +84,30 @@ def _md_to_html(text: str) -> str:
         return f"**{content}**"
 
     text = re.sub(r"^#{1,6}\s+(.+)$", _heading_to_bold, text, flags=re.MULTILINE)
+
+    # Convert markdown tables: remove separator rows, strip leading/trailing pipes
     text = re.sub(r"^\|[-\s|:]+\|$", "", text, flags=re.MULTILINE)
     text = re.sub(r"^\|\s*(.+?)\s*\|$", r"\1", text, flags=re.MULTILINE)
 
-    # Step 3 — HTML-escape plain text
-    text = html_mod.escape(text)
-
-    # Step 4 — convert Markdown formatting to HTML tags (inside-out to avoid overlap)
-    # Bold+italic (***text*** or ___text___) → properly nested <b><i>...</i></b>
-    text = re.sub(r"\*\*\*(.+?)\*\*\*", r"<b><i>\1</i></b>", text)
-    text = re.sub(r"___(.+?)___", r"<b><i>\1</i></b>", text)
-
-    # Bold (**text** or __text__) — replace with stashed placeholder to prevent
-    # the italic pass from matching leftover * inside bold content
-    def _sub_bold(m: re.Match) -> str:
-        return _stash(f"<b>{m.group(1)}</b>")
-
-    text = re.sub(r"\*\*(.+?)\*\*", _sub_bold, text)
-    text = re.sub(r"__(.+?)__", _sub_bold, text)
-
-    # Italic (*text* or _text_) — safe now that bold spans are stashed
-    text = re.sub(r"(?<!\w)\*(.+?)\*(?!\w)", r"<i>\1</i>", text)
-    text = re.sub(r"(?<!\w)_(.+?)_(?!\w)", r"<i>\1</i>", text)
-
-    # Links
-    text = re.sub(r"\[([^\]]+)\]\(([^)]+)\)", r'<a href="\2">\1</a>', text)
-
-    # Step 5 — restore all stashed placeholders
-    for placeholder, html_str in stashed:
-        text = text.replace(placeholder, html_str)
-
+    # Clean up excessive blank lines
     text = re.sub(r"\n{3,}", "\n\n", text)
     return text
+
+
+def _to_markdownv2(text: str) -> str:
+    """Convert LLM markdown to Telegram MarkdownV2 using telegramify-markdown."""
+    from telegramify_markdown import markdownify
+    from telegramify_markdown.customize import get_runtime_config
+
+    # Disable emoji prefixes for headings (we handle headings ourselves)
+    config = get_runtime_config()
+    config.markdown_symbol.head_level_1 = ""
+    config.markdown_symbol.head_level_2 = ""
+    config.markdown_symbol.head_level_3 = ""
+    config.markdown_symbol.head_level_4 = ""
+
+    preprocessed = _preprocess_markdown(text)
+    return markdownify(preprocessed)
 
 
 def _strip_markdown(text: str) -> str:
@@ -156,26 +127,25 @@ def _strip_markdown(text: str) -> str:
 
 
 async def _send_reply(message, text: str) -> None:
-    """Send a reply as Telegram HTML, falling back to stripped plain text on failure."""
+    """Send a reply as Telegram MarkdownV2, falling back to plain text on failure."""
     try:
-        html_text = _md_to_html(text)
+        formatted = _to_markdownv2(text)
     except Exception:
-        logger.exception("_md_to_html conversion failed")
-        html_text = None
+        logger.exception("MarkdownV2 conversion failed")
+        formatted = None
 
-    if html_text:
-        for i in range(0, len(html_text), 4096):
-            chunk = html_text[i : i + 4096]
+    if formatted:
+        for i in range(0, len(formatted), 4096):
+            chunk = formatted[i : i + 4096]
             try:
-                await message.reply_text(chunk, parse_mode=ParseMode.HTML)
+                await message.reply_text(chunk, parse_mode=ParseMode.MARKDOWN_V2)
             except Exception:
-                logger.warning("HTML send failed for chunk, falling back to plain text", exc_info=True)
+                logger.warning("MarkdownV2 send failed, falling back to plain text", exc_info=True)
                 plain = _strip_markdown(text)
                 for j in range(0, len(plain), 4096):
                     await message.reply_text(plain[j : j + 4096])
                 return
     else:
-        # Conversion failed entirely — send stripped plain text
         plain = _strip_markdown(text)
         for j in range(0, len(plain), 4096):
             await message.reply_text(plain[j : j + 4096])
