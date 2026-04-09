@@ -1,4 +1,4 @@
-"""Composio integration — loads external tools (Google Calendar, etc.) and handles execution."""
+"""Composio integration — loads external tools dynamically and handles execution."""
 
 import logging
 import os
@@ -7,19 +7,21 @@ logger = logging.getLogger(__name__)
 
 _toolset = None
 _composio_available = False
+_init_attempted = False
 
 # Map of tool name -> Composio Action for execution
 _action_map: dict[str, object] = {}
 
 
 def _init():
-    global _toolset, _composio_available
-    if _toolset is not None:
+    global _toolset, _composio_available, _init_attempted
+    if _init_attempted:
         return
+    _init_attempted = True
 
     api_key = os.environ.get("COMPOSIO_API_KEY")
     if not api_key:
-        logger.info("COMPOSIO_API_KEY not set — Composio tools disabled")
+        logger.warning("COMPOSIO_API_KEY not set — Composio tools disabled")
         _composio_available = False
         return
 
@@ -27,25 +29,56 @@ def _init():
         from composio import ComposioToolSet
         _toolset = ComposioToolSet(api_key=api_key)
         _composio_available = True
-        logger.info("Composio initialized")
+        logger.info("Composio initialized successfully")
     except Exception:
         logger.exception("Failed to initialize Composio")
         _composio_available = False
 
 
 def get_tools(entity_id: str) -> list[dict]:
-    """Return OpenAI-compatible tool schemas for all connected Composio apps."""
+    """Return OpenAI-compatible tool schemas for all connected apps for this entity."""
     _init()
     if not _composio_available:
         return []
 
     try:
+        # Get all active connections for this entity, then load their tools
+        entity = _toolset.get_entity(id=entity_id)
+        try:
+            connections = entity.get_connections()
+        except Exception:
+            logger.info(f"No connections found for entity {entity_id}")
+            return []
+
+        if not connections:
+            return []
+
+        # Collect unique app names from active connections
+        connected_apps = set()
+        for conn in connections:
+            app_name = conn.appUniqueId or conn.appName
+            if app_name:
+                connected_apps.add(app_name)
+
+        if not connected_apps:
+            return []
+
+        logger.info(f"Entity {entity_id} has connections to: {connected_apps}")
+
+        # Load action schemas for all connected apps
         from composio import App
-        logger.info(f"Loading Composio tools for entity {entity_id}...")
-        action_models = _toolset.get_action_schemas(
-            apps=[App.GOOGLECALENDAR],
-        )
-        logger.info(f"Got {len(action_models)} action schemas from Composio")
+        apps_to_load = []
+        for app_name in connected_apps:
+            try:
+                apps_to_load.append(App(app_name))
+            except Exception:
+                logger.warning(f"Unknown Composio app: {app_name}, skipping")
+
+        if not apps_to_load:
+            return []
+
+        action_models = _toolset.get_action_schemas(apps=apps_to_load)
+        logger.info(f"Got {len(action_models)} action schemas for {connected_apps}")
 
         result = []
         for action in action_models:
@@ -53,7 +86,6 @@ def get_tools(entity_id: str) -> list[dict]:
             if not name:
                 continue
 
-            # Convert ActionModel to OpenAI-compatible function schema
             params = action.parameters
             schema = {
                 "type": "function",
@@ -134,12 +166,16 @@ def initiate_connection(entity_id: str, app_name: str) -> str | None:
     """Start OAuth flow for a user. Returns the redirect URL or None on failure."""
     _init()
     if not _composio_available:
+        logger.warning(f"initiate_connection called but Composio is not available")
         return None
 
     try:
+        logger.info(f"Initiating {app_name} connection for entity {entity_id}")
         entity = _toolset.get_entity(id=entity_id)
         connection = entity.initiate_connection(app_name=app_name)
-        return connection.redirectUrl
+        url = connection.redirectUrl
+        logger.info(f"Got redirect URL for {app_name}: {url[:80] if url else 'None'}...")
+        return url
     except Exception:
         logger.exception(f"Failed to initiate {app_name} connection for {entity_id}")
         return None
@@ -154,6 +190,8 @@ def check_connection(entity_id: str, app_name: str) -> bool:
     try:
         entity = _toolset.get_entity(id=entity_id)
         entity.get_connection(app=app_name)
+        logger.info(f"Entity {entity_id} has active {app_name} connection")
         return True
-    except Exception:
+    except Exception as e:
+        logger.info(f"No active {app_name} connection for entity {entity_id}: {e}")
         return False
