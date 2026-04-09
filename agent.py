@@ -147,7 +147,9 @@ async def chat(user_id: int, user_text: str, image_base64: str | None = None) ->
     entity_id = str(user_id)
 
     # Merge local tools + Composio tools
-    tool_list = list(TOOLS.values()) + composio_bridge.get_tools(entity_id)
+    composio_tools = composio_bridge.get_tools(entity_id)
+    tool_list = list(TOOLS.values()) + composio_tools
+    logger.info(f"Tool count: {len(TOOLS)} local + {len(composio_tools)} composio = {len(tool_list)} total")
 
     for _ in range(MAX_TOOL_ROUNDS):
         data = await _call_llm(messages, tool_list)
@@ -180,6 +182,8 @@ async def chat(user_id: int, user_text: str, image_base64: str | None = None) ->
                 args = json.loads(tc["function"]["arguments"])
             except json.JSONDecodeError:
                 args = {}
+
+            logger.info(f"Tool call: {fn_name} (args: {json.dumps(args, default=str)[:200]})")
 
             # Route to Composio or local tool runner
             if composio_bridge.is_composio_tool(fn_name):
