@@ -97,14 +97,17 @@ def _preprocess_markdown(text: str) -> str:
 def _to_markdownv2(text: str) -> str:
     """Convert LLM markdown to Telegram MarkdownV2 using telegramify-markdown."""
     from telegramify_markdown import markdownify
-    from telegramify_markdown.customize import get_runtime_config
 
     # Disable emoji prefixes for headings (we handle headings ourselves)
-    config = get_runtime_config()
-    config.markdown_symbol.head_level_1 = ""
-    config.markdown_symbol.head_level_2 = ""
-    config.markdown_symbol.head_level_3 = ""
-    config.markdown_symbol.head_level_4 = ""
+    try:
+        from telegramify_markdown.customize import get_runtime_config
+        config = get_runtime_config()
+        config.markdown_symbol.head_level_1 = ""
+        config.markdown_symbol.head_level_2 = ""
+        config.markdown_symbol.head_level_3 = ""
+        config.markdown_symbol.head_level_4 = ""
+    except ImportError:
+        pass  # older/different version — headings may get emoji prefixes
 
     preprocessed = _preprocess_markdown(text)
     return markdownify(preprocessed)

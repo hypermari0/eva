@@ -65,20 +65,25 @@ def get_tools(entity_id: str) -> list[dict]:
 
         logger.info(f"Entity {entity_id} has connections to: {connected_apps}")
 
-        # Load action schemas for all connected apps
+        # Load action schemas for each connected app individually
+        # so one broken connection doesn't block the others
         from composio import App
-        apps_to_load = []
+        action_models = []
         for app_name in connected_apps:
             try:
-                apps_to_load.append(App(app_name))
+                app = App(app_name)
+                schemas = _toolset.get_action_schemas(
+                    apps=[app],
+                    check_connected_accounts=False,
+                )
+                action_models.extend(schemas)
+                logger.info(f"Loaded {len(schemas)} actions for {app_name}")
             except Exception:
-                logger.warning(f"Unknown Composio app: {app_name}, skipping")
+                logger.warning(f"Failed to load actions for {app_name}, skipping", exc_info=True)
 
-        if not apps_to_load:
+        if not action_models:
+            logger.info(f"No action schemas loaded for entity {entity_id}")
             return []
-
-        action_models = _toolset.get_action_schemas(apps=apps_to_load)
-        logger.info(f"Got {len(action_models)} action schemas for {connected_apps}")
 
         result = []
         for action in action_models:
