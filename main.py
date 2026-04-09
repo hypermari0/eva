@@ -148,18 +148,28 @@ def _strip_markdown(text: str) -> str:
 
 async def _send_reply(message, text: str) -> None:
     """Send a reply as Telegram HTML, falling back to stripped plain text on failure."""
-    html_text = _md_to_html(text)
-    for i in range(0, len(html_text), 4096):
-        chunk = html_text[i : i + 4096]
-        try:
-            await message.reply_text(chunk, parse_mode=ParseMode.HTML)
-        except Exception:
-            logger.warning("HTML send failed, falling back to plain text", exc_info=True)
-            # Fallback: send markdown-stripped plain text
-            plain = _strip_markdown(text)
-            for j in range(0, len(plain), 4096):
-                await message.reply_text(plain[j : j + 4096])
-            return  # already sent the full message as plain text
+    try:
+        html_text = _md_to_html(text)
+    except Exception:
+        logger.exception("_md_to_html conversion failed")
+        html_text = None
+
+    if html_text:
+        for i in range(0, len(html_text), 4096):
+            chunk = html_text[i : i + 4096]
+            try:
+                await message.reply_text(chunk, parse_mode=ParseMode.HTML)
+            except Exception:
+                logger.warning("HTML send failed for chunk, falling back to plain text", exc_info=True)
+                plain = _strip_markdown(text)
+                for j in range(0, len(plain), 4096):
+                    await message.reply_text(plain[j : j + 4096])
+                return
+    else:
+        # Conversion failed entirely — send stripped plain text
+        plain = _strip_markdown(text)
+        for j in range(0, len(plain), 4096):
+            await message.reply_text(plain[j : j + 4096])
 
 
 async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -417,7 +427,7 @@ def main() -> None:
     # Check for due reminders every 60 seconds
     app.job_queue.run_repeating(check_reminders, interval=REMINDER_CHECK_INTERVAL, first=10)
 
-    logger.info("Eva is running.")
+    logger.info("Eva v2.1 is running (HTML formatting, OCR, Composio logging).")
     app.run_polling(allowed_updates=Update.ALL_TYPES)
 
 
