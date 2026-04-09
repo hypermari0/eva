@@ -41,9 +41,11 @@ def get_tools(entity_id: str) -> list[dict]:
 
     try:
         from composio import App
+        logger.info(f"Loading Composio tools for entity {entity_id}...")
         action_models = _toolset.get_action_schemas(
             apps=[App.GOOGLECALENDAR],
         )
+        logger.info(f"Got {len(action_models)} action schemas from Composio")
 
         result = []
         for action in action_models:
@@ -91,23 +93,35 @@ def execute(tool_name: str, args: dict, entity_id: str) -> str:
     try:
         # Remove internal _user_id before passing to Composio
         params = {k: v for k, v in args.items() if not k.startswith("_")}
+        logger.info(f"Composio executing {tool_name} for entity {entity_id} with params: {params}")
+
         result = _toolset.execute_action(
             action=tool_name,
             params=params,
             entity_id=str(entity_id),
         )
 
+        logger.info(f"Composio {tool_name} raw result: {result}")
+
         # Result can be a dict or string
         if isinstance(result, dict):
+            # Check for errors at multiple levels
             if result.get("error"):
                 return f"Error: {result['error']}"
+            if result.get("successfull") is False or result.get("successful") is False:
+                error_msg = result.get("error", result.get("data", "Unknown error"))
+                return f"Error: {tool_name} failed — {error_msg}"
+
             data = result.get("data", result)
             if isinstance(data, dict):
+                # Check for nested error
+                if data.get("error"):
+                    return f"Error: {data['error']}"
                 # Format key fields for readability
                 parts = []
                 for k, v in data.items():
                     if v is not None and v != "":
-                        parts.append(f"**{k}**: {v}")
+                        parts.append(f"{k}: {v}")
                 return "\n".join(parts) if parts else str(data)
             return str(data)
         return str(result)

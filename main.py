@@ -68,8 +68,8 @@ def _is_rate_limited(user_id: int) -> bool:
 def _md_to_html(text: str) -> str:
     """Convert common Markdown from LLM output to Telegram-compatible HTML.
 
-    Handles: **bold**, *italic*, `inline code`, ```code blocks```, [links](url).
-    Plain-text characters that are special in HTML (<, >, &) are escaped first.
+    Handles: **bold**, *italic*, `inline code`, ```code blocks```, [links](url),
+    ### headings (→ bold), --- (→ removed), markdown tables (→ clean lines).
     """
     import html as html_mod
 
@@ -90,37 +90,76 @@ def _md_to_html(text: str) -> str:
     text = re.sub(r"```(?:\w*\n)?(.*?)```", _stash_code_block, text, flags=re.DOTALL)
     text = re.sub(r"`([^`]+)`", _stash_inline_code, text)
 
-    # Step 2 — HTML-escape the rest (only <, >, & matter for Telegram HTML)
+    # Step 2 — handle Markdown structure before HTML-escaping
+    # Remove horizontal rules
+    text = re.sub(r"^-{3,}$", "", text, flags=re.MULTILINE)
+
+    # Convert ### headings to bold (Telegram has no heading support)
+    def _heading_to_bold(m: re.Match) -> str:
+        content = m.group(1).strip()
+        # Strip existing ** wrapping to avoid double-bold
+        if content.startswith("**") and content.endswith("**"):
+            content = content[2:-2]
+        return f"**{content}**"
+
+    text = re.sub(r"^#{1,6}\s+(.+)$", _heading_to_bold, text, flags=re.MULTILINE)
+
+    # Convert markdown tables: remove separator rows, strip leading/trailing pipes
+    text = re.sub(r"^\|[-\s|:]+\|$", "", text, flags=re.MULTILINE)  # separator rows
+    text = re.sub(r"^\|\s*(.+?)\s*\|$", r"\1", text, flags=re.MULTILINE)  # data rows
+
+    # Step 3 — HTML-escape the rest (only <, >, & matter for Telegram HTML)
     text = html_mod.escape(text)
 
-    # Step 3 — convert Markdown formatting to HTML tags
+    # Step 4 — convert Markdown formatting to HTML tags
     text = re.sub(r"\*\*(.+?)\*\*", r"<b>\1</b>", text)
-    text = re.sub(r"\*(.+?)\*", r"<i>\1</i>", text)
-    text = re.sub(r"__(.+?)__", r"<b>\1</b>", text)  # __ as bold (common in LLM output)
+    text = re.sub(r"(?<!\w)\*(.+?)\*(?!\w)", r"<i>\1</i>", text)
+    text = re.sub(r"__(.+?)__", r"<b>\1</b>", text)
     text = re.sub(r"(?<!\w)_(.+?)_(?!\w)", r"<i>\1</i>", text)
     text = re.sub(r"\[([^\]]+)\]\(([^)]+)\)", r'<a href="\2">\1</a>', text)
 
-    # Step 4 — restore code blocks and inline code with HTML tags
+    # Step 5 — restore code blocks and inline code with HTML tags
     for i, code in enumerate(inline_codes):
         text = text.replace(f"\x00INLINE{i}\x00", f"<code>{html_mod.escape(code)}</code>")
     for i, code in enumerate(code_blocks):
         text = text.replace(f"\x00CODEBLOCK{i}\x00", f"<pre>{html_mod.escape(code)}</pre>")
 
+    # Clean up excessive blank lines
+    text = re.sub(r"\n{3,}", "\n\n", text)
+
+    return text
+
+
+def _strip_markdown(text: str) -> str:
+    """Remove markdown markers for a clean plain-text fallback."""
+    text = re.sub(r"```(?:\w*\n)?(.*?)```", r"\1", text, flags=re.DOTALL)
+    text = re.sub(r"`([^`]+)`", r"\1", text)
+    text = re.sub(r"^#{1,6}\s+", "", text, flags=re.MULTILINE)
+    text = re.sub(r"^-{3,}$", "", text, flags=re.MULTILINE)
+    text = re.sub(r"^\|[-\s|:]+\|$", "", text, flags=re.MULTILINE)
+    text = re.sub(r"^\|\s*(.+?)\s*\|$", r"\1", text, flags=re.MULTILINE)
+    text = re.sub(r"\*\*(.+?)\*\*", r"\1", text)
+    text = re.sub(r"(?<!\w)\*(.+?)\*(?!\w)", r"\1", text)
+    text = re.sub(r"__(.+?)__", r"\1", text)
+    text = re.sub(r"(?<!\w)_(.+?)_(?!\w)", r"\1", text)
+    text = re.sub(r"\n{3,}", "\n\n", text)
     return text
 
 
 async def _send_reply(message, text: str) -> None:
-    """Send a reply as Telegram HTML, falling back to plain text on failure."""
+    """Send a reply as Telegram HTML, falling back to stripped plain text on failure."""
     html_text = _md_to_html(text)
     for i in range(0, len(html_text), 4096):
         chunk = html_text[i : i + 4096]
         try:
             await message.reply_text(chunk, parse_mode=ParseMode.HTML)
         except Exception:
-            # Fallback: send the original plain text for this chunk
-            plain_start = i  # approximate — lengths may differ slightly
-            plain_chunk = text[plain_start : plain_start + 4096] if plain_start < len(text) else chunk
-            await message.reply_text(plain_chunk)
+            logger.warning("HTML send failed, falling back to plain text", exc_info=True)
+            # Fallback: send markdown-stripped plain text
+            plain = _strip_markdown(text)
+            for j in range(0, len(plain), 4096):
+                await message.reply_text(plain[j : j + 4096])
+            return  # already sent the full message as plain text
 
 
 async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -276,8 +315,12 @@ async def handle_voice(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
 
 
 async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Handle photo/image messages — download, base64-encode, and send to LLM for OCR/vision."""
-    if not update.message or not update.message.photo:
+    """Handle photo/image messages — download, base64-encode, and send to LLM for OCR/vision.
+
+    This handles both compressed photos (filters.PHOTO) and images sent as
+    documents (filters.Document.IMAGE) — e.g. copy-pasted screenshots.
+    """
+    if not update.message:
         return
 
     user_id = update.effective_user.id
@@ -289,9 +332,15 @@ async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
     await update.message.chat.send_action("typing")
 
     try:
-        # Get the highest-resolution version of the photo
-        photo = update.message.photo[-1]
-        file = await context.bot.get_file(photo.file_id)
+        # Determine file_id: from photo array or from document
+        if update.message.photo:
+            file_id = update.message.photo[-1].file_id
+        elif update.message.document:
+            file_id = update.message.document.file_id
+        else:
+            return
+
+        file = await context.bot.get_file(file_id)
         buf = bytearray()
         await file.download_as_bytearray(buf)
 
@@ -362,7 +411,7 @@ def main() -> None:
     app.add_handler(CommandHandler("approve", approve_command))
     app.add_handler(CommandHandler("reject", reject_command))
     app.add_handler(MessageHandler(filters.VOICE | filters.AUDIO, handle_voice))
-    app.add_handler(MessageHandler(filters.PHOTO, handle_photo))
+    app.add_handler(MessageHandler(filters.PHOTO | filters.Document.IMAGE, handle_photo))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
 
     # Check for due reminders every 60 seconds
