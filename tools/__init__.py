@@ -35,7 +35,7 @@ _BLOCKED_ATTRS = frozenset({
 
 
 def _validate_code_ast(code_str: str) -> None:
-    """Validate dynamic skill code doesn't use dangerous patterns."""
+    """Validate dynamic skill code doesn't use dangerous patterns or unavailable imports."""
     wrapped = f"def _f(args):\n"
     for line in code_str.split("\n"):
         wrapped += f"    {line}\n"
@@ -67,6 +67,31 @@ def _validate_code_ast(code_str: str) -> None:
                 raise ValueError(
                     f"Forbidden function call: '{func.id}' is not allowed in dynamic skills"
                 )
+
+        # Block imports of unavailable modules
+        if isinstance(node, ast.Import):
+            for alias in node.names:
+                mod = alias.name.split(".")[0]
+                if mod not in ALLOWED_IMPORTS:
+                    raise ValueError(
+                        f"Import '{alias.name}' is not allowed. "
+                        f"Only these modules are available: {', '.join(sorted(ALLOWED_IMPORTS))}"
+                    )
+        if isinstance(node, ast.ImportFrom):
+            if node.module:
+                mod = node.module.split(".")[0]
+                if mod not in ALLOWED_IMPORTS:
+                    raise ValueError(
+                        f"Import from '{node.module}' is not allowed. "
+                        f"Only these modules are available: {', '.join(sorted(ALLOWED_IMPORTS))}"
+                    )
+
+        # Block async functions — sandbox only supports sync execution
+        if isinstance(node, (ast.AsyncFunctionDef, ast.Await)):
+            raise ValueError(
+                "Async code (async def, await) is not supported in dynamic skills. "
+                "Use synchronous code only. For HTTP calls, use httpx.Client() not AsyncClient()."
+            )
 
 
 def _make_runner(code_str: str):

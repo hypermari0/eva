@@ -14,10 +14,15 @@ TOOL_DEFINITION = {
             "Propose a new skill/tool. The skill will NOT activate immediately — "
             "the user must approve it first via /approve command. "
             "After calling this, explain to the user what the skill will do, "
-            "what external APIs it calls, and tell them to send /approve <name> to activate it. "
-            "The code runs in a sandbox with access to: json, math, datetime, re, urllib.parse, httpx. "
-            "Use httpx for any HTTP calls. "
-            "The code should be the body of a function that receives 'args' dict and returns a string."
+            "what external APIs it calls, and tell them to send /approve <name> to activate it.\n\n"
+            "STRICT RULES for the code:\n"
+            "- ONLY these imports are available: json, math, datetime, re, urllib.parse, httpx\n"
+            "- NO other libraries (no pypdf, feedparser, BeautifulSoup, etc.)\n"
+            "- Code MUST be synchronous — NO async def, NO await, NO httpx.AsyncClient\n"
+            "- For HTTP calls use: httpx.Client() (sync), NOT AsyncClient\n"
+            "- The code is the body of a function receiving 'args' dict, must return a string\n"
+            "- 10-second timeout — keep HTTP calls fast\n"
+            "- If a capability needs a library that isn't available, tell the user it can't be done as a skill"
         ),
         "parameters": {
             "type": "object",
@@ -65,7 +70,7 @@ def run(args: dict) -> str:
     if name in tools.TOOLS and name not in tools.DYNAMIC_SKILLS:
         return f"Error: '{name}' conflicts with a built-in tool."
 
-    # Syntax check + security validation
+    # Syntax check + security validation (imports, async, blocked patterns)
     code = args["code"]
     wrapped = "def _test(args):\n"
     for line in code.split("\n"):
@@ -79,7 +84,14 @@ def run(args: dict) -> str:
         from tools import _validate_code_ast
         _validate_code_ast(code)
     except ValueError as e:
-        return f"Security validation failed: {e}"
+        return f"Validation failed: {e}"
+
+    # Dry-run: try to build the runner to catch import errors early
+    try:
+        from tools import _make_runner
+        test_runner = _make_runner(code)
+    except Exception as e:
+        return f"Skill failed to load: {e}"
 
     # Save as pending
     try:
