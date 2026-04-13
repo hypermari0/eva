@@ -6,3 +6,4 @@ python-dotenv>=1.0.0
 composio-core>=0.7.0
 telegramify-markdown==0.5.4
 pypdf>=4.0.0
+pytz>=2024.1

@@ -6,6 +6,7 @@ import os
 import re
 import time
 from collections import defaultdict
+from datetime import time as dt_time
 
 from dotenv import load_dotenv
 
@@ -457,6 +458,54 @@ async def check_reminders(context: ContextTypes.DEFAULT_TYPE) -> None:
             logger.exception(f"Failed to send reminder {r['id']}")
 
 
+DAILY_BRIEFING_PROMPT = (
+    "Generate my daily briefing for today. Use your tools to gather REAL data:\n"
+    "1. Check my unread emails (use Gmail tools) — highlight urgent ones, group by priority\n"
+    "2. Check my calendar for today (use Google Calendar tools) — list all events with times\n"
+    "3. Search for the latest news (use web_search) on: AI/Tech, Crypto/Web3, World, and Portugal\n\n"
+    "Format the briefing as a clean, concise report with sections for each area. "
+    "Include a checklist of action items at the end. "
+    "If any tool fails, mention it briefly and continue with the others."
+)
+
+
+async def send_daily_briefing(context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Scheduled job: generate and send the daily briefing."""
+    owner_id_str = os.environ.get("OWNER_USER_ID", "")
+    if not owner_id_str:
+        logger.warning("OWNER_USER_ID not set — skipping daily briefing")
+        return
+
+    owner_id = int(owner_id_str)
+    logger.info(f"Generating daily briefing for user {owner_id}")
+
+    try:
+        reply = await agent.chat(owner_id, DAILY_BRIEFING_PROMPT)
+    except Exception:
+        logger.exception("Failed to generate daily briefing")
+        reply = "Sorry, I couldn't generate the daily briefing today. Please try manually."
+
+    try:
+        formatted = _to_markdownv2(reply)
+        for i in range(0, len(formatted), 4096):
+            chunk = formatted[i : i + 4096]
+            try:
+                await context.bot.send_message(
+                    chat_id=owner_id,
+                    text=chunk,
+                    parse_mode=ParseMode.MARKDOWN_V2,
+                )
+            except Exception:
+                plain = _strip_markdown(reply)
+                for j in range(0, len(plain), 4096):
+                    await context.bot.send_message(chat_id=owner_id, text=plain[j : j + 4096])
+                return
+    except Exception:
+        logger.exception("Failed to send daily briefing")
+        for i in range(0, len(reply), 4096):
+            await context.bot.send_message(chat_id=owner_id, text=reply[i : i + 4096])
+
+
 def main() -> None:
     token = os.environ["TELEGRAM_BOT_TOKEN"]
 
@@ -474,7 +523,19 @@ def main() -> None:
     # Check for due reminders every 60 seconds
     app.job_queue.run_repeating(check_reminders, interval=REMINDER_CHECK_INTERVAL, first=10)
 
-    logger.info("Eva v2.1 is running (HTML formatting, OCR, Composio logging).")
+    # Daily briefing at 08:00 Lisbon time (Europe/Lisbon)
+    import pytz
+    lisbon_tz = pytz.timezone("Europe/Lisbon")
+    if os.environ.get("OWNER_USER_ID"):
+        app.job_queue.run_daily(
+            send_daily_briefing,
+            time=dt_time(hour=8, minute=0, tzinfo=lisbon_tz),
+        )
+        logger.info("Daily briefing scheduled for 08:00 Europe/Lisbon")
+    else:
+        logger.warning("OWNER_USER_ID not set — daily briefing disabled")
+
+    logger.info("Eva v2.2 is running.")
     app.run_polling(allowed_updates=Update.ALL_TYPES)
 
 
