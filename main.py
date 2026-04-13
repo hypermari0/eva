@@ -258,8 +258,82 @@ async def reject_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
     await update.message.reply_text(f"Skill '{name}' rejected and discarded.")
 
 
+async def _text_to_voice(text: str) -> bytes | None:
+    """Convert text to speech via Groq Orpheus TTS. Returns WAV bytes or None."""
+    groq_key = os.environ.get("GROQ_API_KEY")
+    if not groq_key:
+        return None
+
+    # Strip markdown formatting for cleaner speech
+    clean = _strip_markdown(text).strip()
+    if not clean:
+        return None
+
+    # Groq TTS has a 200-char limit per request — split into chunks
+    chunks = []
+    for sentence in re.split(r"(?<=[.!?])\s+", clean):
+        if not sentence.strip():
+            continue
+        # Further split long sentences
+        while len(sentence) > 190:
+            cut = sentence[:190].rfind(" ")
+            if cut < 50:
+                cut = 190
+            chunks.append(sentence[:cut].strip())
+            sentence = sentence[cut:].strip()
+        if sentence.strip():
+            chunks.append(sentence.strip())
+
+    if not chunks:
+        return None
+
+    audio_parts = []
+    async with httpx.AsyncClient(timeout=30) as client:
+        for chunk in chunks:
+            try:
+                resp = await client.post(
+                    "https://api.groq.com/openai/v1/audio/speech",
+                    headers={
+                        "Authorization": f"Bearer {groq_key}",
+                        "Content-Type": "application/json",
+                    },
+                    json={
+                        "model": "playai/playht-tts-v3",
+                        "input": chunk,
+                        "voice": "Celeste-PlayAI",
+                        "response_format": "wav",
+                    },
+                )
+                resp.raise_for_status()
+                audio_parts.append(resp.content)
+            except Exception:
+                logger.warning(f"TTS failed for chunk: {chunk[:50]}...", exc_info=True)
+
+    if not audio_parts:
+        return None
+
+    # Concatenate WAV files (skip headers on subsequent parts)
+    if len(audio_parts) == 1:
+        return audio_parts[0]
+
+    # Simple WAV concatenation: keep first header, append raw data from the rest
+    result = bytearray(audio_parts[0])
+    for part in audio_parts[1:]:
+        # WAV data starts after 44-byte header
+        if len(part) > 44:
+            result.extend(part[44:])
+
+    # Fix the file size in the WAV header
+    total_size = len(result)
+    result[4:8] = (total_size - 8).to_bytes(4, "little")
+    # Fix data chunk size (at byte 40)
+    result[40:44] = (total_size - 44).to_bytes(4, "little")
+
+    return bytes(result)
+
+
 async def handle_voice(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Handle voice/audio messages — transcribe via Groq Whisper, then process as text."""
+    """Handle voice/audio messages — transcribe, respond with text + voice."""
     voice = update.message.voice or update.message.audio
     if not voice:
         return
@@ -304,7 +378,16 @@ async def handle_voice(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
         logger.exception("Error processing voice message")
         reply = "Sorry, something went wrong processing your voice message."
 
+    # Send text reply
     await _send_reply(update.message, reply)
+
+    # Send voice reply
+    try:
+        audio = await _text_to_voice(reply)
+        if audio:
+            await update.message.reply_voice(voice=audio)
+    except Exception:
+        logger.warning("Failed to send voice reply", exc_info=True)
 
 
 async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
