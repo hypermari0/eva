@@ -350,6 +350,70 @@ async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
     await _send_reply(update.message, reply)
 
 
+async def handle_document(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Handle PDF and other document messages — extract text and send to LLM."""
+    if not update.message or not update.message.document:
+        return
+
+    user_id = update.effective_user.id
+    if not _is_allowed(user_id):
+        return
+    if _is_rate_limited(user_id):
+        await update.message.reply_text("You're sending messages too fast. Please wait a moment.")
+        return
+    await update.message.chat.send_action("typing")
+
+    doc = update.message.document
+    mime = doc.mime_type or ""
+    caption = update.message.caption or ""
+
+    try:
+        file = await context.bot.get_file(doc.file_id)
+        buf = bytearray()
+        await file.download_as_bytearray(buf)
+
+        if mime == "application/pdf":
+            import io
+            from pypdf import PdfReader
+
+            reader = PdfReader(io.BytesIO(bytes(buf)))
+            pages_text = []
+            for i, page in enumerate(reader.pages, 1):
+                text = page.extract_text()
+                if text and text.strip():
+                    pages_text.append(f"[Page {i}]\n{text.strip()}")
+
+            if not pages_text:
+                await update.message.reply_text("I couldn't extract any text from this PDF.")
+                return
+
+            extracted = "\n\n".join(pages_text)
+            # Truncate if very long to fit in LLM context
+            if len(extracted) > 15000:
+                extracted = extracted[:15000] + "\n\n... (truncated)"
+
+            prompt = f"The user sent a PDF document"
+            if doc.file_name:
+                prompt += f' named "{doc.file_name}"'
+            prompt += f". Here is the extracted text:\n\n{extracted}"
+            if caption:
+                prompt += f"\n\nThe user's message: {caption}"
+            else:
+                prompt += "\n\nPlease summarize the key points of this document."
+
+            reply = await agent.chat(user_id, prompt)
+        else:
+            reply = f"Sorry, I can't process {mime or 'this'} files yet. I support images and PDFs."
+    except ImportError:
+        logger.exception("pypdf not installed")
+        reply = "Sorry, PDF reading is not available (missing pypdf library)."
+    except Exception:
+        logger.exception("Error processing document")
+        reply = "Sorry, something went wrong processing your document."
+
+    await _send_reply(update.message, reply)
+
+
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     if not update.message or not update.message.text:
         return
@@ -404,6 +468,7 @@ def main() -> None:
     app.add_handler(CommandHandler("reject", reject_command))
     app.add_handler(MessageHandler(filters.VOICE | filters.AUDIO, handle_voice))
     app.add_handler(MessageHandler(filters.PHOTO | filters.Document.IMAGE, handle_photo))
+    app.add_handler(MessageHandler(filters.Document.PDF, handle_document))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
 
     # Check for due reminders every 60 seconds
