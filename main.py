@@ -541,15 +541,21 @@ async def check_reminders(context: ContextTypes.DEFAULT_TYPE) -> None:
             logger.exception(f"Failed to send reminder {r['id']}")
 
 
-DAILY_BRIEFING_PROMPT = (
-    "Generate my daily briefing for today. Use your tools to gather REAL data:\n"
-    "1. Check my unread emails (use Gmail tools) — highlight urgent ones, group by priority\n"
-    "2. Check my calendar for today (use Google Calendar tools) — list all events with times\n"
-    "3. Search for the latest news (use web_search) on: AI/Tech, Crypto/Web3, World, and Portugal\n\n"
-    "Format the briefing as a clean, concise report with sections for each area. "
-    "Include a checklist of action items at the end. "
-    "If any tool fails, mention it briefly and continue with the others."
-)
+def _build_daily_briefing_prompt() -> str:
+    """Build the briefing prompt, optionally appending a local-news region."""
+    topics = "AI/Tech, Crypto/Web3, World"
+    local_region = os.environ.get("BRIEFING_LOCAL_REGION", "").strip()
+    if local_region:
+        topics += f", and {local_region}"
+    return (
+        "Generate my daily briefing for today. Use your tools to gather REAL data:\n"
+        "1. Check my unread emails (use Gmail tools) — highlight urgent ones, group by priority\n"
+        "2. Check my calendar for today (use Google Calendar tools) — list all events with times\n"
+        f"3. Search for the latest news (use web_search) on: {topics}\n\n"
+        "Format the briefing as a clean, concise report with sections for each area. "
+        "Include a checklist of action items at the end. "
+        "If any tool fails, mention it briefly and continue with the others."
+    )
 
 
 async def send_daily_briefing(context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -563,7 +569,7 @@ async def send_daily_briefing(context: ContextTypes.DEFAULT_TYPE) -> None:
     logger.info(f"Generating daily briefing for user {owner_id}")
 
     try:
-        reply = await agent.chat(owner_id, DAILY_BRIEFING_PROMPT)
+        reply = await agent.chat(owner_id, _build_daily_briefing_prompt())
     except Exception:
         logger.exception("Failed to generate daily briefing")
         reply = "Sorry, I couldn't generate the daily briefing today. Please try manually."
@@ -606,19 +612,27 @@ def main() -> None:
     # Check for due reminders every 60 seconds
     app.job_queue.run_repeating(check_reminders, interval=REMINDER_CHECK_INTERVAL, first=10)
 
-    # Daily briefing at 08:00 Lisbon time (Europe/Lisbon)
-    import pytz
-    lisbon_tz = pytz.timezone("Europe/Lisbon")
+    # Daily briefing — configure via BRIEFING_TIMEZONE (IANA tz, default UTC)
+    # and BRIEFING_HOUR / BRIEFING_MINUTE (24h local time, default 08:00).
     if os.environ.get("OWNER_USER_ID"):
+        import pytz
+        tz_name = os.environ.get("BRIEFING_TIMEZONE", "UTC")
+        try:
+            briefing_tz = pytz.timezone(tz_name)
+        except pytz.UnknownTimeZoneError:
+            logger.warning(f"Unknown BRIEFING_TIMEZONE '{tz_name}', falling back to UTC")
+            briefing_tz = pytz.UTC
+        hour = int(os.environ.get("BRIEFING_HOUR", "8"))
+        minute = int(os.environ.get("BRIEFING_MINUTE", "0"))
         app.job_queue.run_daily(
             send_daily_briefing,
-            time=dt_time(hour=8, minute=0, tzinfo=lisbon_tz),
+            time=dt_time(hour=hour, minute=minute, tzinfo=briefing_tz),
         )
-        logger.info("Daily briefing scheduled for 08:00 Europe/Lisbon")
+        logger.info(f"Daily briefing scheduled for {hour:02d}:{minute:02d} {tz_name}")
     else:
-        logger.warning("OWNER_USER_ID not set — daily briefing disabled")
+        logger.info("OWNER_USER_ID not set — daily briefing disabled")
 
-    logger.info("Eva v2.2 is running.")
+    logger.info("Eva is running.")
     app.run_polling(allowed_updates=Update.ALL_TYPES)
 
 

@@ -1,80 +1,82 @@
-# Eva — Personal AI Assistant (Telegram Bot)
+# Eva
 
-A Telegram bot powered by Claude via OpenRouter, with persistent memory (Supabase) and an extensible tool system.
+**A personal AI assistant that lives in Telegram.**
+
+Eva is a Telegram bot powered by a frontier LLM (via OpenRouter), with persistent memory (Supabase), multimodal input (text, voice, images, PDFs), external app integrations (Google Calendar, Gmail, GitHub, Slack, … via Composio), and a tool system that can extend itself at runtime.
+
+She's designed to be *ambient* instead of *destination* AI: no new app to open, no new tab to switch to — just a contact you chat with like any other.
 
 ## Features
 
-- **Conversational AI** — Claude Sonnet 4.5 via OpenRouter
-- **Persistent memory** — conversation history stored per user in Supabase
-- **Tool system** — auto-discovered from the `tools/` folder; add a file, get a skill
-- **Reminders** — schedule reminders that get delivered via Telegram
-- **Web search** — real-time web search via Tavily
-- **Deploy-ready** — one-click deploy to Railway
+- **Chat with any OpenRouter model** — Claude, GPT, Gemini, Mistral, Llama. Switch at runtime.
+- **Persistent memory** — conversation history + per-user profile, persisted in Supabase.
+- **Multimodal** — handles text, voice messages (transcribed + voice reply), photos (OCR / vision), and PDFs (extracted + summarized).
+- **Reminders** — natural-language reminders delivered via Telegram.
+- **Web search** — via Tavily.
+- **External apps** — Google Calendar, Gmail, Slack, GitHub and more via Composio OAuth.
+- **Daily briefing** — optional scheduled briefing at a time and timezone you configure.
+- **Self-extending** — the LLM can propose new tools at runtime. Tools go through an approval flow before they activate, and run in a restricted AST-validated sandbox.
+- **Access controlled** — allowlist Telegram user IDs so only you (and whoever you choose) can message your instance.
+- **Deploy-ready** — runs locally with `python main.py`, or one-click deploy to Railway.
 
-## Quick Start
+## Quick start
 
-### 1. Create the Telegram Bot
+### 1. Prerequisites
 
-1. Open Telegram and message [@BotFather](https://t.me/BotFather)
-2. Send `/newbot`
-3. Choose a name (e.g. "Eva") and a username (e.g. `eva_ai_assistant_bot`)
-4. Copy the **bot token** — you'll need it for `TELEGRAM_BOT_TOKEN`
+You'll need accounts and API keys for:
 
-### 2. Set Up Supabase
+- **Telegram** — create a bot via [@BotFather](https://t.me/BotFather) and grab the token.
+- **OpenRouter** — [openrouter.ai](https://openrouter.ai) → API key. Pay as you go.
+- **Supabase** — [supabase.com](https://supabase.com) → new project → **service_role** key (not anon).
 
-1. Create a project at [supabase.com](https://supabase.com)
-2. Go to **SQL Editor** and run the contents of `supabase/schema.sql`
-3. Go to **Settings → API** and copy:
-   - **Project URL** → `SUPABASE_URL`
-   - **anon public key** → `SUPABASE_KEY`
+Optional but recommended:
 
-### 3. Get API Keys
+- **Tavily** ([tavily.com](https://tavily.com)) — web search.
+- **Groq** ([groq.com](https://console.groq.com)) — voice transcription + TTS.
+- **Composio** ([composio.dev](https://composio.dev)) — Google Calendar, Gmail, Slack, GitHub, etc.
 
-- **OpenRouter**: Sign up at [openrouter.ai](https://openrouter.ai), go to Keys, create one → `OPENROUTER_API_KEY`
-- **Tavily**: Sign up at [tavily.com](https://tavily.com), get your API key → `TAVILY_API_KEY`
+### 2. Set up the database
 
-### 4. Run Locally
+In the Supabase SQL editor, paste and run the contents of [`supabase/schema.sql`](supabase/schema.sql). It creates the tables and enables row-level security.
+
+### 3. Configure
 
 ```bash
-# Clone and enter the project
-cd eva
+cp .env.example .env
+# Edit .env with your keys. At minimum:
+#   TELEGRAM_BOT_TOKEN, OPENROUTER_API_KEY, SUPABASE_URL, SUPABASE_KEY
+# Strongly recommended: set ALLOWED_USER_IDS to your own Telegram ID
+# so strangers can't burn through your API credits.
+```
 
-# Create a virtual environment
+To find your Telegram user ID, message [@userinfobot](https://t.me/userinfobot).
+
+### 4. Run
+
+```bash
 python3 -m venv .venv
 source .venv/bin/activate
-
-# Install dependencies
 pip install -r requirements.txt
-
-# Set up environment variables
-cp .env.example .env
-# Edit .env with your actual keys
-
-# Run
 python main.py
 ```
 
-### 5. Deploy to Railway
+Open Telegram, message your bot, and say hi.
 
-1. Push this repo to GitHub
-2. Go to [railway.app](https://railway.app) and create a new project
-3. Select **Deploy from GitHub repo** and pick this repo
-4. Go to **Variables** and add all five env vars:
-   - `TELEGRAM_BOT_TOKEN`
-   - `OPENROUTER_API_KEY`
-   - `SUPABASE_URL`
-   - `SUPABASE_KEY`
-   - `TAVILY_API_KEY`
-5. Railway will auto-detect `railway.toml` and deploy. That's it.
+### 5. (Optional) Deploy to Railway
 
-## Adding New Tools
+1. Push the repo to your own GitHub.
+2. [railway.app](https://railway.app) → **New project** → **Deploy from GitHub repo**.
+3. Add your env vars in **Variables**.
+4. Railway picks up `railway.toml` and runs `python main.py`. Done.
 
-The tool system auto-discovers any `.py` file in the `tools/` folder. To add a new tool:
+## Extending Eva
 
-1. Create a new file, e.g. `tools/my_tool.py`
-2. Define two things:
+### Add a static tool
+
+Drop a file in `tools/`. Two exports and you're done:
 
 ```python
+# tools/my_tool.py
 TOOL_DEFINITION = {
     "type": "function",
     "function": {
@@ -83,10 +85,7 @@ TOOL_DEFINITION = {
         "parameters": {
             "type": "object",
             "properties": {
-                "arg_name": {
-                    "type": "string",
-                    "description": "What this argument is for.",
-                },
+                "arg_name": {"type": "string", "description": "What this argument is for."},
             },
             "required": ["arg_name"],
         },
@@ -95,43 +94,90 @@ TOOL_DEFINITION = {
 
 
 def run(args: dict) -> str:
-    # args["_user_id"] is always available (Telegram user ID)
+    # args["_user_id"] is always injected (Telegram user ID)
     return f"Result for {args['arg_name']}"
 ```
 
-3. Restart the bot. The tool is automatically available to the LLM.
+Restart the bot. The tool is auto-discovered and available to the LLM immediately.
 
-## Project Structure
+### Let Eva add her own tools
+
+Ask her to. Example:
+
+> *"Can you check the weather for me?"*
+
+She'll draft a new tool (name, description, parameter schema, code) using the built-in `create_skill`. It's saved as **pending**. You approve it with `/approve <name>` in the chat, or discard with `/reject <name>`. Once approved, it's live — no restart needed.
+
+Dynamic skill code runs in a sandbox: AST-validated, restricted imports (`json`, `math`, `datetime`, `re`, `urllib.parse`, `httpx`), no async, 10-second timeout, no filesystem or arbitrary-module access. See `tools/__init__.py` for the sandbox implementation.
+
+### Customize personality
+
+- `config/soul.md` — who Eva is. Rewrite freely to fit whatever assistant you want.
+- `config/system_prompt.txt` — the full prompt template (soul + user profile + instructions).
+
+No code changes needed. Restart to apply.
+
+### Connect external apps
+
+With `COMPOSIO_API_KEY` set:
+
+```
+/connect googlecalendar
+/connect gmail
+/connect slack
+/connect github
+```
+
+Each opens an OAuth link. Once authorized, the app's tools become available to Eva automatically.
+
+## Architecture
 
 ```
 eva/
-├── main.py                    # Bot entry point, Telegram handlers
-├── agent.py                   # LLM interaction, tool call loop
-├── memory.py                  # Supabase read/write helpers
+├── main.py              # Telegram handlers, message routing, scheduled jobs
+├── agent.py             # LLM interaction + tool-call loop (OpenRouter)
+├── memory.py            # Supabase helpers (messages, reminders, profiles, skills)
+├── composio_bridge.py   # Composio tool loading + execution
 ├── tools/
-│   ├── __init__.py            # Auto-discovery loader
-│   ├── get_current_datetime.py
-│   ├── web_search.py
-│   └── create_reminder.py
+│   ├── __init__.py      # Auto-discovery + dynamic-skill sandbox
+│   ├── create_skill.py  # Propose a new tool (pending → /approve)
+│   ├── *.py             # Built-in tools
 ├── config/
-│   └── system_prompt.txt      # Editable system prompt
+│   ├── soul.md          # Assistant persona
+│   └── system_prompt.txt
 ├── supabase/
-│   └── schema.sql             # Database schema
+│   └── schema.sql       # Tables + RLS policies
 ├── requirements.txt
 ├── railway.toml
-├── .env.example
-└── .gitignore
+└── .env.example
 ```
 
-## Configuration
+### How a message flows
 
-Edit `config/system_prompt.txt` to change the bot's personality and behavior. No code changes needed — just edit the file and restart.
+1. User sends a message (text / voice / image / PDF) on Telegram.
+2. `main.py` handler authorizes the user (`ALLOWED_USER_IDS`), enforces rate limits, decodes media if needed.
+3. `agent.py` loads the last 20 messages + user profile from Supabase, assembles the system prompt, and calls OpenRouter with the active tool list (built-ins + connected Composio apps + approved dynamic skills).
+4. If the LLM wants to call a tool, `agent.py` executes it and feeds the result back. Up to 5 tool rounds per message.
+5. Final reply is sent to Telegram and saved to Supabase.
+6. A 60-second background job checks for due reminders. A daily job (if `OWNER_USER_ID` is set) sends the morning briefing.
 
-## How It Works
+## Security notes
 
-1. User sends a message on Telegram
-2. Bot loads the last 20 messages from Supabase for that user
-3. Sends conversation + system prompt + available tools to Claude via OpenRouter
-4. If Claude calls a tool, the bot executes it and sends the result back (up to 5 rounds)
-5. Final text response is sent to the user and saved to Supabase
-6. A background job checks for due reminders every 60 seconds
+- **Always set `ALLOWED_USER_IDS`.** Without it, anyone who discovers your bot can spend your API budget.
+- Use the Supabase **service_role** key. The schema applies RLS that denies `anon` entirely — the bot is the only thing that should talk to the DB.
+- Dynamic skills are sandboxed but sandboxes are hard. Review every `/approve`d skill like you'd review a PR from a stranger.
+- Voice transcription, TTS, and vision all send raw content to external providers (Groq, OpenRouter). Read their data policies before sending anything sensitive.
+- `.env` is gitignored. Double-check before `git push` that you didn't commit any secrets.
+
+## Roadmap / ideas
+
+This is a personal side project, open-sourced in case it's useful to others. It is not actively supported as a product. PRs welcome for:
+
+- Better prompt/memory management (summarization, vector search over long history)
+- More Telegram surfaces (inline, buttons, edit flows)
+- Multi-user mode with proper tenancy
+- More rigorous skill sandboxing (subprocess isolation)
+
+## License
+
+[MIT](LICENSE) — do whatever you want with it.
