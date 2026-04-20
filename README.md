@@ -108,7 +108,17 @@ Ask her to. Example:
 
 She'll draft a new tool (name, description, parameter schema, code) using the built-in `create_skill`. It's saved as **pending**. You approve it with `/approve <name>` in the chat, or discard with `/reject <name>`. Once approved, it's live — no restart needed.
 
-Dynamic skill code runs in a sandbox: AST-validated, restricted imports (`json`, `math`, `datetime`, `re`, `urllib.parse`, `httpx`), no async, 10-second timeout, no filesystem or arbitrary-module access. See `tools/__init__.py` for the sandbox implementation.
+Dynamic skills run with **defense-in-depth restrictions**, not true isolation:
+
+- AST validation blocks dunder access, `eval`/`exec`/`getattr`/`open`, async, and imports outside the allowlist.
+- A minimal `__builtins__` namespace removes `__import__`, `open`, `globals`, etc.
+- Allowed imports: `json`, `math`, `datetime`, `re`, `urllib.parse`, `httpx`.
+- `httpx` is replaced with a SSRF-filtered wrapper that rejects private, loopback, link-local, multicast, reserved, and cloud-metadata addresses.
+- 10-second thread-level timeout per call.
+
+**This is not a security boundary.** Python in-process sandboxes are escapable through operator overloading, C-extension quirks, `str.format` descriptors, and similar. Review every approved skill like an unvetted PR from a stranger — a malicious approved skill gets arbitrary code execution inside the bot process (and therefore your API keys). For real isolation, run skills in a subprocess with seccomp/`nsjail`/Firecracker (out of scope for this repo).
+
+See `tools/__init__.py` and `tools/_safe_httpx.py` for implementation.
 
 ### Customize personality
 

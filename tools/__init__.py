@@ -1,10 +1,17 @@
 """Auto-discovery of tool modules + dynamic skill loading.
 
-Every .py file in this folder (except __init__.py) is expected to expose:
+Every .py file in this folder (except names starting with '_') is expected to expose:
     TOOL_DEFINITION : dict   — OpenAI-compatible function schema
     run(args: dict) -> str   — executes the tool and returns a string result
 
-Dynamic skills are loaded from Supabase and executed in a sandbox.
+Dynamic skills are loaded from Supabase and executed with **defense-in-depth
+restrictions** — not true isolation. The layers are: AST validation (blocks
+dunder access, restricted imports, async, dangerous builtins), a minimal
+`__builtins__` namespace, a SSRF-filtered `httpx` wrapper, and a 10-second
+thread timeout. Python in-process sandboxes are known to be escapable through
+subtle mechanisms (operator overloading, C-extension quirks, str.format
+descriptors). Every approved skill should be reviewed like an unvetted PR.
+True isolation requires a subprocess / container with seccomp or similar.
 """
 
 import ast
@@ -22,6 +29,17 @@ DYNAMIC_SKILLS: set[str] = set()  # names of dynamic (not static) tools
 
 ALLOWED_IMPORTS = {"json", "math", "datetime", "re", "urllib.parse", "httpx"}
 DYNAMIC_TIMEOUT = 10  # seconds
+
+_SAFE_HTTPX = None
+
+
+def _get_safe_httpx():
+    """Lazily build and cache the SSRF-filtered httpx module for sandboxed skills."""
+    global _SAFE_HTTPX
+    if _SAFE_HTTPX is None:
+        from tools._safe_httpx import build_safe_httpx
+        _SAFE_HTTPX = build_safe_httpx()
+    return _SAFE_HTTPX
 
 # Dunder attributes that allow sandbox escapes (class walking, globals access, etc.)
 _BLOCKED_ATTRS = frozenset({
@@ -120,6 +138,8 @@ def _make_runner(code_str: str):
     def _safe_import(name, *a, **kw):
         if name not in ALLOWED_IMPORTS:
             raise ImportError(f"Import '{name}' is not allowed in dynamic skills")
+        if name == "httpx":
+            return _get_safe_httpx()
         return importlib.import_module(name)
 
     safe_builtins["__import__"] = _safe_import

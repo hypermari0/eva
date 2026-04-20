@@ -390,6 +390,25 @@ async def handle_voice(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
         logger.warning("Failed to send voice reply", exc_info=True)
 
 
+_IMAGE_MAGIC = (
+    (b"\x89PNG\r\n\x1a\n", "image/png"),
+    (b"\xff\xd8\xff", "image/jpeg"),
+    (b"GIF87a", "image/gif"),
+    (b"GIF89a", "image/gif"),
+)
+
+
+def _sniff_image_mime(buf: bytes, fallback: str = "image/jpeg") -> str:
+    """Detect the real image MIME from magic bytes. Vision models reject mislabeled images."""
+    for magic, mime in _IMAGE_MAGIC:
+        if buf.startswith(magic):
+            return mime
+    # WebP: "RIFF....WEBP"
+    if len(buf) >= 12 and buf[:4] == b"RIFF" and buf[8:12] == b"WEBP":
+        return "image/webp"
+    return fallback
+
+
 async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Handle photo/image messages — download, base64-encode, and send to LLM for OCR/vision.
 
@@ -408,28 +427,34 @@ async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
     await update.message.chat.send_action("typing")
 
     try:
-        # Determine file_id: from photo array or from document
+        # Determine file_id + MIME hint: photos are always JPEG (Telegram compresses),
+        # documents carry their own mime_type (PNG screenshots land here).
+        doc_mime_hint = "image/jpeg"
         if update.message.photo:
             file_id = update.message.photo[-1].file_id
         elif update.message.document:
             file_id = update.message.document.file_id
+            if update.message.document.mime_type:
+                doc_mime_hint = update.message.document.mime_type
         else:
             return
 
         file = await context.bot.get_file(file_id)
         buf = bytearray()
         await file.download_as_bytearray(buf)
+        raw = bytes(buf)
 
-        # Base64-encode for the multimodal LLM call
-        img_b64 = base64.b64encode(bytes(buf)).decode("utf-8")
+        # Sniff actual magic bytes — Telegram mime hints are not always reliable,
+        # and mislabeling (e.g. PNG sent as image/jpeg) makes strict vision models
+        # silently drop the image AND sometimes the caption along with it.
+        mime = _sniff_image_mime(raw, fallback=doc_mime_hint)
+        img_b64 = base64.b64encode(raw).decode("utf-8")
 
-        # Use caption as the user's text prompt, if any
         caption = update.message.caption or ""
-
-        reply = await agent.chat(user_id, caption, image_base64=img_b64)
-    except Exception:
+        reply = await agent.chat(user_id, caption, image_base64=img_b64, image_mime=mime)
+    except Exception as e:
         logger.exception("Error processing photo message")
-        reply = "Sorry, something went wrong processing your image."
+        reply = f"Sorry, something went wrong processing your image. ({type(e).__name__}: {e})"
 
     await _send_reply(update.message, reply)
 
@@ -515,9 +540,9 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
 
     try:
         reply = await agent.chat(user_id, text)
-    except Exception:
+    except Exception as e:
         logger.exception("Error processing message")
-        reply = "Sorry, something went wrong. Please try again."
+        reply = f"Sorry, something went wrong. ({type(e).__name__}: {e})"
 
     await _send_reply(update.message, reply)
 
@@ -549,12 +574,16 @@ def _build_daily_briefing_prompt() -> str:
         topics += f", and {local_region}"
     return (
         "Generate my daily briefing for today. Use your tools to gather REAL data:\n"
+        "0. First call get_current_datetime so you know today's date in my local timezone — "
+        "'today' means today in my local zone, NOT UTC.\n"
         "1. Check my unread emails (use Gmail tools) — highlight urgent ones, group by priority\n"
-        "2. Check my calendar for today (use Google Calendar tools) — list all events with times\n"
+        "2. Check my calendar for today (use Google Calendar tools) — list all events with their "
+        "local start/end times in my timezone\n"
         f"3. Search for the latest news (use web_search) on: {topics}\n\n"
         "Format the briefing as a clean, concise report with sections for each area. "
         "Include a checklist of action items at the end. "
-        "If any tool fails, mention it briefly and continue with the others."
+        "If any tool fails, mention it briefly and continue with the others — never abandon the "
+        "whole briefing because one step errored."
     )
 
 
@@ -570,9 +599,12 @@ async def send_daily_briefing(context: ContextTypes.DEFAULT_TYPE) -> None:
 
     try:
         reply = await agent.chat(owner_id, _build_daily_briefing_prompt())
-    except Exception:
+    except Exception as e:
         logger.exception("Failed to generate daily briefing")
-        reply = "Sorry, I couldn't generate the daily briefing today. Please try manually."
+        reply = (
+            f"Sorry, I couldn't generate the daily briefing today. "
+            f"({type(e).__name__}: {e}). Please try manually."
+        )
 
     try:
         formatted = _to_markdownv2(reply)
