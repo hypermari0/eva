@@ -1,9 +1,64 @@
 """Composio integration — loads external tools dynamically and handles execution."""
 
+import json
 import logging
 import os
 
 logger = logging.getLogger(__name__)
+
+# Cap on a single tool result; prevents 20k+ char Gmail dumps from busting the
+# model context (and drowning the LLM in noise it can't use).
+MAX_RESULT_CHARS = 8000
+
+# Fields we strip from Gmail/Calendar responses because they're bulky and the
+# LLM doesn't need them to summarize. Keeping subject/from/snippet/date/to for
+# email, and summary/start/end/description/location/attendees for events.
+_GMAIL_HEAVY = frozenset({
+    "payload", "body", "raw", "internalDate", "sizeEstimate", "historyId",
+    "labelIds",
+})
+_CALENDAR_HEAVY = frozenset({
+    "htmlLink", "etag", "iCalUID", "sequence", "reminders", "creator",
+    "organizer", "eventType", "kind", "conferenceData", "hangoutLink",
+    "created", "updated",
+})
+
+
+def _strip_heavy(obj, heavy):
+    if isinstance(obj, dict):
+        return {k: _strip_heavy(v, heavy) for k, v in obj.items() if k not in heavy}
+    if isinstance(obj, list):
+        return [_strip_heavy(x, heavy) for x in obj]
+    return obj
+
+
+def _unwrap(payload):
+    """Peel Composio's envelope keys so the LLM sees actual content, not wrappers."""
+    # Some Composio responses nest real data under response_data; unwrap if
+    # that's the only key or clearly the payload root.
+    while isinstance(payload, dict) and len(payload) == 1 and "response_data" in payload:
+        payload = payload["response_data"]
+    return payload
+
+
+def _serialize_result(tool_name: str, data) -> str:
+    heavy = frozenset()
+    if tool_name.startswith("GMAIL_"):
+        heavy = _GMAIL_HEAVY
+    elif tool_name.startswith("GOOGLECALENDAR_"):
+        heavy = _CALENDAR_HEAVY
+    trimmed = _strip_heavy(data, heavy) if heavy else data
+    try:
+        text = json.dumps(trimmed, ensure_ascii=False, indent=2, default=str)
+    except Exception:
+        text = str(trimmed)
+    if len(text) > MAX_RESULT_CHARS:
+        return (
+            text[:MAX_RESULT_CHARS]
+            + f"\n... (truncated; full result was {len(text)} chars — "
+            "call the tool again with a narrower query if you need more)"
+        )
+    return text
 
 _toolset = None
 _composio_available = False
@@ -138,30 +193,27 @@ def execute(tool_name: str, args: dict, entity_id: str) -> str:
             entity_id=str(entity_id),
         )
 
-        logger.info(f"Composio {tool_name} raw result: {result}")
+        # Truncate raw result in logs too so Railway logs stay sane
+        raw_preview = str(result)
+        if len(raw_preview) > 2000:
+            raw_preview = raw_preview[:2000] + f"... (+{len(str(result)) - 2000} chars)"
+        logger.info(f"Composio {tool_name} raw result: {raw_preview}")
 
-        # Result can be a dict or string
         if isinstance(result, dict):
-            # Check for errors at multiple levels
             if result.get("error"):
                 return f"Error: {result['error']}"
             if result.get("successfull") is False or result.get("successful") is False:
-                error_msg = result.get("error", result.get("data", "Unknown error"))
-                return f"Error: {tool_name} failed — {error_msg}"
+                err = result.get("error") or result.get("data") or "Unknown error"
+                return f"Error: {tool_name} failed — {err}"
+            payload = result.get("data", result)
+        else:
+            payload = result
 
-            data = result.get("data", result)
-            if isinstance(data, dict):
-                # Check for nested error
-                if data.get("error"):
-                    return f"Error: {data['error']}"
-                # Format key fields for readability
-                parts = []
-                for k, v in data.items():
-                    if v is not None and v != "":
-                        parts.append(f"{k}: {v}")
-                return "\n".join(parts) if parts else str(data)
-            return str(data)
-        return str(result)
+        if isinstance(payload, dict) and payload.get("error"):
+            return f"Error: {payload['error']}"
+
+        payload = _unwrap(payload)
+        return _serialize_result(tool_name, payload)
     except Exception as e:
         logger.exception(f"Composio tool {tool_name} failed")
         return f"Error executing {tool_name}: {e}"
