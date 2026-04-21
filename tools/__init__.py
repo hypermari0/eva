@@ -23,9 +23,15 @@ from pathlib import Path
 
 logger = logging.getLogger(__name__)
 
-TOOLS: dict[str, dict] = {}       # name -> schema
-RUNNERS: dict[str, callable] = {} # name -> run function
-DYNAMIC_SKILLS: set[str] = set()  # names of dynamic (not static) tools
+TOOLS: dict[str, dict] = {}       # STATIC tool schemas (discovered from .py files)
+RUNNERS: dict[str, callable] = {} # ALL runners — static + every approved dynamic skill
+DYNAMIC_SKILLS: set[str] = set()  # names of approved dynamic skills (Level 0)
+# Approved dynamic skills live here with their full tool schema but are NOT
+# auto-exposed to the LLM. The model sees only their {name, description} list
+# (Level 0). To USE a skill the model must call `load_skill(name)` which queues
+# it in _pending_skill_loads; the agent drains that on the next tool round.
+DYNAMIC_SKILL_REGISTRY: dict[str, dict] = {}  # name -> schema
+_pending_skill_loads: dict[str, set[str]] = {}  # user_id -> set of skill names
 
 ALLOWED_IMPORTS = {"json", "math", "datetime", "re", "urllib.parse", "httpx"}
 DYNAMIC_TIMEOUT = 10  # seconds
@@ -198,9 +204,10 @@ def load_dynamic_skills() -> None:
 
 
 def register_dynamic_skill(name: str, description: str, parameters: dict, code: str) -> None:
-    """Register a dynamic skill in-memory (available immediately)."""
+    """Register a dynamic skill's runner + Level-0 metadata. Schema is NOT added
+    to TOOLS; the LLM must opt in via `load_skill` to make the schema available."""
     runner = _make_runner(code)
-    TOOLS[name] = {
+    schema = {
         "type": "function",
         "function": {
             "name": name,
@@ -208,17 +215,46 @@ def register_dynamic_skill(name: str, description: str, parameters: dict, code: 
             "parameters": parameters,
         },
     }
+    DYNAMIC_SKILL_REGISTRY[name] = schema
     RUNNERS[name] = runner
     DYNAMIC_SKILLS.add(name)
-    logger.info(f"Registered dynamic skill: {name}")
+    logger.info(f"Registered dynamic skill (Level 0): {name}")
 
 
 def unregister_dynamic_skill(name: str) -> None:
-    """Remove a dynamic skill from memory."""
+    """Remove a dynamic skill from memory (registry + any active exposure)."""
     TOOLS.pop(name, None)
     RUNNERS.pop(name, None)
     DYNAMIC_SKILLS.discard(name)
+    DYNAMIC_SKILL_REGISTRY.pop(name, None)
+    for pending in _pending_skill_loads.values():
+        pending.discard(name)
     logger.info(f"Unregistered dynamic skill: {name}")
+
+
+def mark_pending_skill(user_id, name: str) -> None:
+    """Queue a skill to be added to the next tool round's active tool list."""
+    _pending_skill_loads.setdefault(str(user_id), set()).add(name)
+
+
+def drain_pending_skills(user_id) -> set[str]:
+    """Return and clear the skill names queued via mark_pending_skill for this user."""
+    return _pending_skill_loads.pop(str(user_id), set())
+
+
+def get_skill_schemas(names) -> list[dict]:
+    """Return the tool schemas for these skill names (skipping unknown ones)."""
+    return [DYNAMIC_SKILL_REGISTRY[n] for n in names if n in DYNAMIC_SKILL_REGISTRY]
+
+
+def list_dynamic_skill_summary() -> list[tuple[str, str]]:
+    """Return (name, description) pairs for all registered skills — feeds the Level-0 block."""
+    out = []
+    for name in sorted(DYNAMIC_SKILL_REGISTRY):
+        schema = DYNAMIC_SKILL_REGISTRY[name]
+        desc = (schema.get("function") or {}).get("description", "") or ""
+        out.append((name, desc))
+    return out
 
 
 # Load static tools immediately

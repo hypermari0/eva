@@ -196,6 +196,29 @@ def forget_preference(user_id: int, topic: str) -> int:
     return len(resp.data or [])
 
 
+# --- User memory (curated notebook — environment, conventions, lessons) ---
+
+def get_user_memory(user_id: int) -> str:
+    resp = (
+        get_client()
+        .table("user_memory")
+        .select("body")
+        .eq("user_id", user_id)
+        .execute()
+    )
+    if resp.data:
+        return resp.data[0].get("body") or ""
+    return ""
+
+
+def save_user_memory(user_id: int, body: str) -> None:
+    get_client().table("user_memory").upsert({
+        "user_id": user_id,
+        "body": body,
+        "updated_at": datetime.now(timezone.utc).isoformat(),
+    }).execute()
+
+
 # --- Settings ---
 
 def get_setting(key: str, default: str = "") -> str:

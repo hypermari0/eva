@@ -68,15 +68,35 @@ create table if not exists dynamic_skills (
     updated_at timestamptz not null default now()
 );
 
+-- Settings: process-wide key/value (e.g. current model for change_model).
+create table if not exists settings (
+    key text primary key,
+    value text not null,
+    updated_at timestamptz not null default now()
+);
+
+-- User memory: a small curated notebook per user for environment, conventions,
+-- and lessons. One row per user. The app enforces a hard character cap and
+-- injects the text frozen at session start.
+create table if not exists user_memory (
+    user_id bigint primary key,
+    body text not null default '',
+    updated_at timestamptz not null default now()
+);
+
 -- RLS enabled on all tables. service_role bypasses RLS; anon is blocked.
 alter table messages enable row level security;
 alter table reminders enable row level security;
 alter table user_profiles enable row level security;
 alter table user_preferences enable row level security;
 alter table dynamic_skills enable row level security;
+alter table settings enable row level security;
+alter table user_memory enable row level security;
 
 create policy "Deny anon access to messages" on messages for all to anon using (false);
 create policy "Deny anon access to reminders" on reminders for all to anon using (false);
 create policy "Deny anon access to user_profiles" on user_profiles for all to anon using (false);
 create policy "Deny anon access to user_preferences" on user_preferences for all to anon using (false);
 create policy "Deny anon access to dynamic_skills" on dynamic_skills for all to anon using (false);
+create policy "Deny anon access to settings" on settings for all to anon using (false);
+create policy "Deny anon access to user_memory" on user_memory for all to anon using (false);
