@@ -258,6 +258,30 @@ async def reject_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
     await update.message.reply_text(f"Skill '{name}' rejected and discarded.")
 
 
+async def preferences_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Handle /preferences — show the learned preferences Eva is using."""
+    if not _is_allowed(update.effective_user.id):
+        return
+    try:
+        prefs = memory.get_preferences(update.effective_user.id, limit=50)
+    except Exception as e:
+        await update.message.reply_text(f"Failed to load preferences: {type(e).__name__}: {e}")
+        return
+    if not prefs:
+        await update.message.reply_text(
+            "No preferences stored yet. I'll learn as you correct me or state preferences."
+        )
+        return
+    marker = {"positive": "+", "negative": "-", "neutral": "·"}
+    lines = ["Learned preferences (latest per topic):", ""]
+    for p in prefs:
+        topic = p.get("topic", "?")
+        sentiment = p.get("sentiment", "neutral")
+        preference = (p.get("preference") or "").strip()
+        lines.append(f"{marker.get(sentiment, '·')} [{topic}] {preference}")
+    await update.message.reply_text("\n".join(lines))
+
+
 async def _text_to_voice(text: str) -> bytes | None:
     """Convert text to speech via Groq Orpheus TTS. Returns WAV bytes or None."""
     groq_key = os.environ.get("GROQ_API_KEY")
@@ -577,7 +601,9 @@ def _build_daily_briefing_prompt() -> str:
         "follow these steps IN ORDER and pass the parameters I specify:\n\n"
         "STEP 0 — Call get_current_datetime FIRST. 'Today' always means today in my local "
         "timezone, never UTC. Note the local date and the local midnight boundaries (start "
-        "of today = YYYY-MM-DDT00:00:00±HH:MM, end of today = YYYY-MM-DDT23:59:59±HH:MM).\n\n"
+        "of today = YYYY-MM-DDT00:00:00±HH:MM, end of today = YYYY-MM-DDT23:59:59±HH:MM). "
+        "Gmail and Google Calendar tools are pre-loaded for this briefing — do NOT call "
+        "load_app_tools again for those two, their actions are already available.\n\n"
         "STEP 1 — Read my emails with a Gmail fetch/search action.\n"
         "  - Use query: `is:unread newer_than:2d` (focus on urgent, recent unread mail).\n"
         "  - Request at most 20 results.\n"
@@ -607,6 +633,14 @@ async def send_daily_briefing(context: ContextTypes.DEFAULT_TYPE) -> None:
 
     owner_id = int(owner_id_str)
     logger.info(f"Generating daily briefing for user {owner_id}")
+
+    # Pre-queue Gmail + Calendar for the briefing so the LLM doesn't have to
+    # spend a round calling load_app_tools before it can read either one.
+    # chat() drains this queue before its first LLM call.
+    owner_entity = str(owner_id)
+    for app in ("gmail", "googlecalendar"):
+        if app in composio_bridge.get_connected_apps(owner_entity):
+            composio_bridge.mark_pending_app(owner_entity, app)
 
     try:
         reply = await agent.chat(owner_id, _build_daily_briefing_prompt())
@@ -647,6 +681,7 @@ def main() -> None:
     app.add_handler(CommandHandler("connect", connect_command))
     app.add_handler(CommandHandler("approve", approve_command))
     app.add_handler(CommandHandler("reject", reject_command))
+    app.add_handler(CommandHandler("preferences", preferences_command))
     app.add_handler(MessageHandler(filters.VOICE | filters.AUDIO, handle_voice))
     app.add_handler(MessageHandler(filters.PHOTO | filters.Document.IMAGE, handle_photo))
     app.add_handler(MessageHandler(filters.Document.PDF, handle_document))
