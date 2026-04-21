@@ -196,6 +196,32 @@ def forget_preference(user_id: int, topic: str) -> int:
     return len(resp.data or [])
 
 
+def count_preferences(user_id: int) -> int:
+    """Return the number of distinct preference rows stored for this user."""
+    resp = (
+        get_client()
+        .table("user_preferences")
+        .select("id")
+        .eq("user_id", user_id)
+        .execute()
+    )
+    return len(resp.data or [])
+
+
+def get_preferences_since(user_id: int, since_iso: str) -> list[dict]:
+    """Return preferences created since a timestamp (ISO 8601), newest first."""
+    resp = (
+        get_client()
+        .table("user_preferences")
+        .select("topic, preference, sentiment, source_excerpt, created_at")
+        .eq("user_id", user_id)
+        .gte("created_at", since_iso)
+        .order("created_at", desc=True)
+        .execute()
+    )
+    return resp.data or []
+
+
 # --- User memory (curated notebook — environment, conventions, lessons) ---
 
 def get_user_memory(user_id: int) -> str:

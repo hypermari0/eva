@@ -6,7 +6,7 @@ import os
 import re
 import time
 from collections import defaultdict
-from datetime import time as dt_time
+from datetime import datetime, time as dt_time, timedelta, timezone
 
 from dotenv import load_dotenv
 
@@ -624,6 +624,44 @@ def _build_daily_briefing_prompt() -> str:
     )
 
 
+async def send_weekly_preferences_digest(context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Scheduled job: once per week, list the preferences Eva captured in the last 7 days.
+
+    Sent on Sundays at 09:00 local (see scheduler in main()). Skipped silently when
+    zero new preferences were captured — no need to spam an empty digest.
+    """
+    owner_id_str = os.environ.get("OWNER_USER_ID", "")
+    if not owner_id_str:
+        return
+    owner_id = int(owner_id_str)
+    since = (datetime.now(timezone.utc) - timedelta(days=7)).isoformat()
+
+    try:
+        new_prefs = memory.get_preferences_since(owner_id, since)
+    except Exception:
+        logger.exception("Weekly preferences digest query failed")
+        return
+    if not new_prefs:
+        return
+
+    marker = {"positive": "+", "negative": "-", "neutral": "·"}
+    lines = [
+        f"Weekly preferences digest — {len(new_prefs)} captured this week.",
+        "Review and /preferences to see the full list. Tell me to drop any that are wrong.",
+        "",
+    ]
+    for p in new_prefs:
+        topic = p.get("topic", "?")
+        sentiment = p.get("sentiment", "neutral")
+        preference = (p.get("preference") or "").strip()
+        lines.append(f"{marker.get(sentiment, '·')} [{topic}] {preference}")
+
+    try:
+        await context.bot.send_message(chat_id=owner_id, text="\n".join(lines))
+    except Exception:
+        logger.exception("Failed to send weekly preferences digest")
+
+
 async def send_daily_briefing(context: ContextTypes.DEFAULT_TYPE) -> None:
     """Scheduled job: generate and send the daily briefing."""
     owner_id_str = os.environ.get("OWNER_USER_ID", "")
@@ -707,8 +745,16 @@ def main() -> None:
             time=dt_time(hour=hour, minute=minute, tzinfo=briefing_tz),
         )
         logger.info(f"Daily briefing scheduled for {hour:02d}:{minute:02d} {tz_name}")
+
+        # Weekly preferences digest — Sundays at 09:00 local.
+        app.job_queue.run_daily(
+            send_weekly_preferences_digest,
+            time=dt_time(hour=9, minute=0, tzinfo=briefing_tz),
+            days=(6,),
+        )
+        logger.info(f"Weekly preferences digest scheduled for Sun 09:00 {tz_name}")
     else:
-        logger.info("OWNER_USER_ID not set — daily briefing disabled")
+        logger.info("OWNER_USER_ID not set — daily briefing and weekly digest disabled")
 
     logger.info("Eva is running.")
     app.run_polling(allowed_updates=Update.ALL_TYPES)
