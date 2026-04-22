@@ -591,35 +591,72 @@ async def check_reminders(context: ContextTypes.DEFAULT_TYPE) -> None:
 
 
 def _build_daily_briefing_prompt() -> str:
-    """Build the briefing prompt, optionally appending a local-news region."""
+    """Build the briefing prompt with TODAY's dates injected literally.
+
+    LLMs routinely compose stale dates from training data when asked to "derive
+    today" — even when the system prompt already states the correct date. So we
+    pre-compute the local date, midnight boundaries, and Gmail date filter in
+    Python and bake them into the prompt as literal values the model just copies.
+    """
+    import pytz
+
     topics = "AI/Tech, Crypto/Web3, World"
     local_region = os.environ.get("BRIEFING_LOCAL_REGION", "").strip()
     if local_region:
         topics += f", and {local_region}"
+
+    tz_name = (
+        os.environ.get("USER_TIMEZONE")
+        or os.environ.get("BRIEFING_TIMEZONE")
+        or "UTC"
+    )
+    try:
+        tz = pytz.timezone(tz_name)
+    except pytz.UnknownTimeZoneError:
+        tz = pytz.UTC
+        tz_name = "UTC"
+
+    now_local = datetime.now(timezone.utc).astimezone(tz)
+    today_date = now_local.date().isoformat()
+    start_iso = now_local.replace(
+        hour=0, minute=0, second=0, microsecond=0
+    ).strftime("%Y-%m-%dT%H:%M:%S%z")
+    end_iso = now_local.replace(
+        hour=23, minute=59, second=59, microsecond=0
+    ).strftime("%Y-%m-%dT%H:%M:%S%z")
+    # RFC 3339 wants the colon in the offset (e.g. +01:00, not +0100).
+    start_iso = start_iso[:-2] + ":" + start_iso[-2:]
+    end_iso = end_iso[:-2] + ":" + end_iso[-2:]
+    # Gmail accepts YYYY/MM/DD in `after:` — use yesterday so we catch late-arriving
+    # mail from the last ~24h without picking up anything much older.
+    yesterday_gmail = (now_local.date() - timedelta(days=1)).strftime("%Y/%m/%d")
+
     return (
-        "Generate my daily briefing for today. Use your tools to gather REAL data — "
-        "follow these steps IN ORDER and pass the parameters I specify:\n\n"
-        "STEP 0 — Call get_current_datetime FIRST. 'Today' always means today in my local "
-        "timezone, never UTC. Note the local date and the local midnight boundaries (start "
-        "of today = YYYY-MM-DDT00:00:00±HH:MM, end of today = YYYY-MM-DDT23:59:59±HH:MM). "
-        "Gmail and Google Calendar tools are pre-loaded for this briefing — do NOT call "
-        "load_app_tools again for those two, their actions are already available.\n\n"
-        "STEP 1 — Read my emails with a Gmail fetch/search action.\n"
-        "  - Use query: `is:unread newer_than:2d` (focus on urgent, recent unread mail).\n"
+        f"Generate my daily briefing for TODAY = {today_date} ({tz_name}). Use your tools to "
+        "gather REAL data. Use the exact values below — do NOT substitute dates from memory.\n\n"
+        "Gmail and Google Calendar are pre-loaded for this briefing — do NOT call load_app_tools "
+        "again for those two, their actions are already available.\n\n"
+        "STEP 1 — Unread email with a Gmail fetch/search action.\n"
+        f"  - Pass query EXACTLY: `is:unread after:{yesterday_gmail}`\n"
         "  - Request at most 20 results.\n"
         "  - For each email, extract: from, subject, date, snippet.\n"
-        "  - Group by urgency (urgent / needs-reply / informational), highlight anything "
-        "that looks time-sensitive.\n\n"
-        "STEP 2 — Read today's calendar with a Google Calendar list-events action.\n"
-        "  - Pass timeMin and timeMax in RFC 3339 with my LOCAL timezone offset, covering "
-        "today from 00:00 to 23:59 inclusive.\n"
-        "  - Use singleEvents=true and orderBy=startTime.\n"
-        "  - For each event, report: title, local start–end time, location/link, attendees "
-        "(count or names).\n\n"
-        f"STEP 3 — web_search the latest news on: {topics}. "
-        "3 results max per topic, 1–2 sentence summary each.\n\n"
-        "OUTPUT — a concise sectioned report (Emails, Calendar, News, Action items). "
-        "If a step errors, say so briefly in that section and continue with the others — "
+        "  - Report dates EXACTLY as Gmail returned them. Do NOT rewrite or infer dates.\n"
+        "  - Group by urgency (urgent / needs-reply / informational).\n\n"
+        "STEP 2 — Today's calendar with a Google Calendar list-events action.\n"
+        f"  - timeMin = {start_iso}\n"
+        f"  - timeMax = {end_iso}\n"
+        f"  - timezone = {tz_name}\n"
+        "  - singleEvents = true, orderBy = startTime\n"
+        "  - For each event, report: title, local start–end time, location/link, attendees (count or names).\n\n"
+        f"STEP 3 — web_search the latest news on: {topics}.\n"
+        "  - For EACH topic, call web_search with topic='news' AND time_range='day'. "
+        "Prefix each query with the year (e.g. 'AI industry news 2026').\n"
+        "  - Use the `published_date` field from results to filter out anything older than "
+        f"{today_date} minus 2 days. If a result lacks a published_date or is older, skip it.\n"
+        "  - 3 results max per topic, 1–2 sentence summary each.\n\n"
+        "OUTPUT — a concise sectioned report (Emails, Calendar, News, Action items).\n"
+        f"  - Header line MUST read: 'Daily briefing — {today_date}'.\n"
+        "  - If a step errors, say so briefly in that section and continue with the others — "
         "never abandon the whole briefing because one step failed."
     )
 

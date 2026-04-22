@@ -4,7 +4,7 @@ import asyncio
 import json
 import logging
 import os
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 import httpx
@@ -94,7 +94,9 @@ def _current_time_block() -> str:
     """Ground the model in reality: actual wall-clock date/time in the user's local zone.
 
     Critical because LLM training cutoffs make models hallucinate "today" as a date from
-    their training data (e.g. mid-2024) when it's actually 2026.
+    their training data (e.g. mid-2024) when it's actually 2026. We pre-compute common
+    derived values (midnight boundaries, Gmail after-date) so on-demand briefings and
+    other date-sensitive calls can copy literals instead of re-deriving them.
     """
     tz_name = (
         os.environ.get("USER_TIMEZONE")
@@ -112,13 +114,24 @@ def _current_time_block() -> str:
     offset = local_now.strftime("%z")
     offset_fmt = f"{offset[:3]}:{offset[3:]}" if offset else "+00:00"
 
+    today_iso = local_now.date().isoformat()
+    start_raw = local_now.replace(hour=0, minute=0, second=0, microsecond=0).strftime("%Y-%m-%dT%H:%M:%S%z")
+    end_raw = local_now.replace(hour=23, minute=59, second=59, microsecond=0).strftime("%Y-%m-%dT%H:%M:%S%z")
+    today_start_iso = start_raw[:-2] + ":" + start_raw[-2:]
+    today_end_iso = end_raw[:-2] + ":" + end_raw[-2:]
+    yesterday_gmail = (local_now.date() - timedelta(days=1)).strftime("%Y/%m/%d")
+
     return (
         "# Current Time (authoritative — trust this over any date you remember from training)\n"
         f"- Today (user local, {tz_name}): {local_now.strftime('%A, %Y-%m-%d %H:%M')} {offset_fmt}\n"
         f"- Today (UTC): {utc_now.strftime('%Y-%m-%d %H:%M')} UTC\n"
+        f"- Today (YYYY-MM-DD): {today_iso}\n"
+        f"- Today local midnight: {today_start_iso}  →  {today_end_iso}\n"
+        f"- Gmail `after:` filter for last 24h: after:{yesterday_gmail}\n"
         f"- ISO 8601 local now: {local_now.strftime('%Y-%m-%dT%H:%M:%S%z')}\n"
         "Whenever you say 'today', 'tomorrow', or schedule/fetch time-bound data "
-        "(calendar, briefing, reminders, news), use these values — never a date from memory."
+        "(calendar, briefing, reminders, news), copy these values verbatim — never a date from memory. "
+        "For news searches use `web_search` with `topic='news'` and `time_range='day'`."
     )
 
 
