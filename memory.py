@@ -1,5 +1,7 @@
 """Supabase helpers for conversation memory and reminders."""
 
+from __future__ import annotations
+
 import os
 from datetime import datetime, timezone
 
