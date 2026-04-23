@@ -25,6 +25,3 @@ Thumbs.db
 
 # Claude Code local settings
 .claude/settings.local.json
-
-# Migration output (contains exported persona + user notes)
-hermes-migration/
